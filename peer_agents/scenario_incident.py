@@ -71,6 +71,7 @@ def build(
     publish_all_findings: bool = False,
     link_budget: int = LINK_BUDGET,
     brain_mode: str = "rule",
+    brain_overrides: dict[str, Brain] | None = None,
 ) -> Runtime:
     """组装一个可运行的故障定位系统。
 
@@ -84,11 +85,20 @@ def build(
     brain_mode:
         "rule" 确定性 RuleBrain，用于可复现实验
         "llm"  LLMBrain，真实走 HTTP 大模型协议（需要 OPENAI_API_KEY / BASE_URL）
+    brain_overrides:
+        按 agent id 换掉某个成员的大脑。这是为**跨语言**准备的入口 ——
+        让一个 Node / Go / Rust 写的进程坐进同一张桌子，而其余成员、
+        拓扑与场景一个字都不用改。``run_wire_demo.py`` 用的就是它。
     """
     active_hub = hub if topology == "star" else None
     board = Blackboard()
     board.publish_directory(DIRECTORY)
     brain_map = _build_brains(active_hub, hub_summarize_chars, brain_mode)
+    if brain_overrides:
+        unknown = sorted(set(brain_overrides) - set(_ROSTER))
+        if unknown:
+            raise ValueError(f"brain_overrides 里有不在名册上的成员：{unknown}")
+        brain_map.update(brain_overrides)
 
     if topology == "peer":
         bus = MessageBus(policy=full_mesh_policy)
