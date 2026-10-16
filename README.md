@@ -1,297 +1,299 @@
 # peer-agents
 
-> 一个多 Agent 通信实验台：让子 Agent 之间**直接对话**,并且**自己决定该跟谁建立连接**。
+**English** | [简体中文](README.zh-CN.md)
 
-现在的多 Agent 框架大多是一个主 Agent 派活给下属,下属之间不能横向传递信息。这个仓库想知道的是:如果把横向通信打开,会发生什么?
+> A testbed for multi-agent communication: sub-agents talk to **each other** — and **decide for themselves whom to connect to**.
 
-结论是可以量化的,而且有点反直觉。整个项目**零依赖**,只用 Python 标准库。
+Most multi-agent frameworks today have a single orchestrator handing work down to subordinates, with no way for those subordinates to pass information sideways. This repo asks a simple question: what actually happens if you open up lateral communication?
+
+The answer turns out to be quantifiable, and a little counterintuitive. The whole project has **zero dependencies** — standard library only.
 
 ```bash
-python run_demo.py            # 五组拓扑对比实验,约 0.1 秒跑完
-python run_dirty_demo.py      # 脏环境四组对比:过期数据/传闻/沉默成员
-python run_llm_demo.py        # 用 LLM 协议端到端跑一遍(自带本地桩服务)
-python -m unittest discover -s tests    # 72 项回归测试
+python run_demo.py            # five topologies compared, runs in ~0.1s
+python run_dirty_demo.py      # four dirty-environment configs: stale data / rumor / silent member
+python run_llm_demo.py        # end-to-end LLM protocol run (bundles a local stub server)
+python -m unittest discover -s tests    # 72 regression tests
 ```
 
 ---
 
-## 一、核心结论
+## 1. The core result
 
-同一场故障定位任务,只改变「子 Agent 能不能直接说话」这一个变量:
+Same incident-triage task. One variable changed: **can sub-agents talk to each other directly?**
 
-| 配置 | 业务消息 | 控制消息 | 轮次 | 横向消息 | 主 Agent 负载 | 保真度 |
+| Configuration | Data msgs | Control msgs | Rounds | Lateral msgs | Hub load | Fidelity |
 |---|---|---|---|---|---|---|
-| 对等协作(全连通) | **9** | 0 | **5** | 6 | **3** | 100% |
-| 星型转述(中心化) | 15 | 0 | 8 | 0 | 15 | 100% |
-| 星型转述 + 主 Agent 摘要 | 15 | 0 | 8 | 0 | 15 | **50%** |
-| 自适应拓扑(预算 3) | **9** | 8 | 6 | 6 | **3** | 100% |
-| 自适应拓扑(预算 2) | **9** | 8 | 7 | 6 | **3** | 100% |
+| Peer (full mesh) | **9** | 0 | **5** | 6 | **3** | 100% |
+| Star relay (centralized) | 15 | 0 | 8 | 0 | 15 | 100% |
+| Star relay + hub summarization | 15 | 0 | 8 | 0 | 15 | **50%** |
+| Adaptive topology (budget 3) | **9** | 8 | 6 | 6 | **3** | 100% |
+| Adaptive topology (budget 2) | **9** | 8 | 7 | 6 | **3** | 100% |
 
-三条值得注意的发现:
+Three findings worth noting:
 
-**1. 中心化枢纽会同时成为「信息瓶颈」和「上下文瓶颈」。**
-星型拓扑下主 Agent 经手了系统里的**每一条**业务消息(`主 Agent 负载 == 业务消息总数`)。对等拓扑下它只经手 3 条。这个数字可以直接换算成上下文窗口开销。
+**1. A central hub becomes both an information bottleneck and a context bottleneck.**
+Under star topology the hub handles **every single** data message in the system (`hub load == total data messages`). Under peer topology it handles 3. That number converts directly into context-window cost.
 
-**2. 最不可替代的价值不是「快」,而是「信息不被中间人损耗」。**
-第三组模拟了真实 LLM 主 Agent 的行为——它会**转述**而不是**转发**。我在代投时把内容截断到 38 字,终报里的关键证据 `status IN (6 个值)` 和 `idx_order_items_status` 就当场消失了,结论只剩一个空壳。**保真度从 100% 掉到 50%。**
+**2. The irreplaceable value isn't "faster" — it's "information that no middleman degrades."**
+The third row simulates what a real LLM orchestrator actually does: it **paraphrases** rather than **forwards**. When I truncated relayed content to 38 characters, the decisive evidence in the final report — `status IN (6 values)` and `idx_order_items_status` — vanished on the spot, leaving a hollow shell of a conclusion. **Fidelity fell from 100% to 50%.**
 
-**3. 拓扑可以是长出来的,而不是被规划的。**
-后两组的起点只有 3 条链路,**数据库组甚至是个孤岛**。Agent 用 8 条协商报文把网络自己扩成 6 条(或 4 条),业务消息量最终**追平**了「上帝视角预先全连通」的对等架构,而且没有任何节点承担全局上下文。8 条报文是一次性投资,换掉的是「启动时谁也不知道该连谁」这个现实困境。
+**3. Topology can be grown, not planned.**
+The last two rows start from only 3 links — **the database team is a literal island.** The agents use 8 negotiation messages to expand the network to 6 links (or 4), and data traffic ends up **matching** a peer architecture that an omniscient planner had fully connected from the start — with no node carrying global context. Those 8 messages are a one-time investment that buys you out of a real problem: at startup, nobody knows who to connect to.
 
-一个反直觉的涌现结果:把链路预算从 3 收紧到 2 后,最终链路**更少**(4 条),却触发了 3 次 LRU 淘汰,而**平均路径从 1.33 跳缩短到 1.11 跳**,业务量与保真度纹丝不动。原因是预算紧张时被淘汰的都是低频连接,留下的是真正高频的骨干——拓扑在自我优化。
+One counterintuitive emergent result: tightening the link budget from 3 to 2 produced **fewer** final links (4), yet triggered 3 LRU evictions, while **average path length fell from 1.33 hops to 1.11** — with traffic and fidelity completely unchanged. The reason: under budget pressure, what gets evicted are the low-frequency connections, and what survives is the genuinely high-traffic backbone. The topology optimizes itself.
 
-> ⚠️ **但上面这张表是「干净环境」的结论,请不要直接外推。** 它成立的前提是:每个 topic 只有一个知情者、信息永远新鲜、答案永远自洽。真实环境不长这样。第四节把环境刻意做脏之后,结论会**反转** —— 建议先读完那一节再下判断。
+> ⚠️ **But that table is a "clean environment" result — do not extrapolate it.** It holds only because every topic has exactly one knowledgeable party, information is always fresh, and answers are always self-consistent. Real environments do not look like that. Section 4 deliberately dirties the environment, and the conclusion **inverts** — read that section before forming a judgement.
 
 ---
 
-## 二、架构
+## 2. Architecture
 
 ```
 peer-agents/
-├── run_demo.py                 五组配置的对比实验入口
-├── run_dirty_demo.py           脏环境实验入口(对话全文 + 认知账本)
-├── run_llm_demo.py             LLM 协议端到端演示(可切换真实模型)
-├── pyproject.toml              打包 + pytest/ruff/mypy 配置(零运行时依赖)
-├── .github/workflows/ci.yml    CI:测试矩阵 / 零依赖可用性 / 静态检查
+├── run_demo.py                 entry point for the five-configuration comparison
+├── run_dirty_demo.py           dirty-environment entry point (full transcript + cognition ledgers)
+├── run_llm_demo.py             end-to-end LLM protocol demo (switchable to a real model)
+├── pyproject.toml              packaging + pytest/ruff/mypy config (zero runtime dependencies)
+├── .github/workflows/ci.yml    CI: test matrix / zero-dep availability / static checks
 ├── tools/
-│   └── mock_llm_server.py      本地 LLM 桩服务(用于验证协议层)
+│   └── mock_llm_server.py      local LLM stub server (used to verify the protocol layer)
 ├── peer_agents/
-│   ├── message.py              不可变消息模型(可寻址/可转发/可多跳)
-│   ├── bus.py                  消息总线:投递 + 拓扑管控 + 路由 + 建链协商
-│   ├── topology.py             动态通信图:预算 / LRU 淘汰 / BFS 最短路
-│   ├── blackboard.py           共享黑板(服务发现 + 事实沉淀)
-│   ├── agent.py                Agent 壳 + 可插拔大脑
-│   ├── runtime.py              事件循环 + 收敛/熔断/故障隔离护栏
-│   ├── facts.py                带元数据的事实:置信度/时间戳/出处/来源
-│   ├── scenario_incident.py    场景 A:一次生产故障的分布式定位(干净)
-│   ├── scenario_dirty.py       场景 B:同一个故障,但环境做脏了
-│   ├── brain_dirty.py          认知风格:轻信 / 怀疑(支持自我更正与重试)
-│   ├── llm.py                  可选:把规则大脑换成 LLM 大脑
-│   ├── report.py               控制台 trace 与 HTML 报告
-│   └── dirty_report.py         脏环境报告:争议裁决 + 认知账本
+│   ├── message.py              immutable message model (addressable / forwardable / multi-hop)
+│   ├── bus.py                  message bus: delivery + topology control + routing + link negotiation
+│   ├── topology.py             dynamic communication graph: budget / LRU eviction / BFS shortest path
+│   ├── blackboard.py           shared blackboard (service discovery + fact accumulation)
+│   ├── agent.py                agent shell + pluggable brain
+│   ├── runtime.py              event loop + convergence / circuit-breaker / fault-isolation guardrails
+│   ├── facts.py                facts carrying metadata: confidence / timestamp / evidence / source
+│   ├── scenario_incident.py     scenario A: distributed triage of a production incident (clean)
+│   ├── scenario_dirty.py       scenario B: the same incident, with the environment dirtied
+│   ├── brain_dirty.py          dispositions: gullible / skeptical (with self-correction and retry)
+│   ├── llm.py                  optional: swap the rule brain for an LLM brain
+│   ├── report.py               console trace and HTML report
+│   └── dirty_report.py         dirty-environment report: claim adjudication + cognition ledgers
 └── tests/
-    ├── test_peer_agents.py     30 项:通信机制回归
-    ├── test_dirty.py           24 项:脏环境机制回归
-    └── test_runtime.py         18 项:运行时可信性回归(失败可见/故障隔离/重入/确定性)
+    ├── test_peer_agents.py     30 tests: communication-mechanism regressions
+    ├── test_dirty.py           24 tests: dirty-environment mechanism regressions
+    └── test_runtime.py         18 tests: runtime trustworthiness (failure visibility / fault isolation / re-entrancy / determinism)
 ```
 
-### 三个设计决定
+### Three design decisions
 
-**1. 认知与通信解耦。**
-Agent 只负责「身份 + 信箱」,决策逻辑放在可插拔的 `Brain` 里。所以既能用确定性的 `RuleBrain` 做**可复现**实验,也能换成接真实模型的 `LLMBrain`。**通信基础设施的成熟度和单个 Agent 的智能水平是正交的两件事。**
+**1. Cognition is decoupled from communication.**
+An agent owns only an identity and a mailbox; the decision logic lives in a pluggable `Brain`. So you can run **reproducible** experiments with the deterministic `RuleBrain`, or swap in an `LLMBrain` backed by a real model. **The maturity of the communication infrastructure and the intelligence of any individual agent are orthogonal concerns.**
 
-**2. 拓扑是基础设施层的策略,不是写死在业务逻辑里的。**
-总线只认一个函数:`policy(src, dst) -> bool`。业务代码一行不改,只换这个函数,整个系统就从中心化变成对等。星型拓扑下总线不静默丢包,而是自动交给枢纽代投并打上 `relay_to` 标记——这让「一切经主 Agent 转述」不需要任何业务代码配合就能复现,也就有了公平的对照基准。
+**2. Topology is an infrastructure-layer policy, not something hard-coded into business logic.**
+The bus honors exactly one function: `policy(src, dst) -> bool`. Change nothing in business code — change only that function, and the entire system goes from centralized to peer. Under star topology the bus does not silently drop packets; it hands them to the hub to relay and tags them with `relay_to`. That makes "everything gets paraphrased through the orchestrator" reproducible without a single line of cooperation from business code — which is what gives us a fair baseline to compare against.
 
-**3. 控制面 / 数据面分离。**
-动态拓扑模式下,建链协商走**带外寻址**(直接按通讯录地址投递,不受当前拓扑约束),业务消息严格受拓扑约束。对应真实网络里路由协议与数据转发的分离——否则会陷入「要建链先要有链」的鸡生蛋问题。
+**3. Control plane / data plane separation.**
+In dynamic-topology mode, link negotiation uses **out-of-band addressing** (delivered straight to a directory address, unconstrained by the current topology), while data messages remain strictly topology-constrained. This mirrors the separation of routing protocols from data forwarding in real networks — otherwise you hit the chicken-and-egg problem of "you need a link before you can negotiate a link."
 
-### 放开通信后必须补的四道护栏
+### Four guardrails you must add once communication is open
 
-这是落地时最容易翻车的地方,`runtime.py` 实现了四个:
+This is where implementations most often fall over. `runtime.py` has all four:
 
-- **收敛性**:不能靠某个 Agent 自己说「我做完了」。要整整一轮没有任何 Agent 收到邮件,**且挂起队列为空**,才判定达成稳定态。
-- **死循环**:消息去重 + 「同一问题只追问一次」+ 跳数上限,三层叠加。注意去重签名必须包含 `relayed_by`,否则枢纽代投的报文会被误判为重复而丢弃。
-- **可控性**:总消息预算熔断,避免失控烧掉 API 额度;另有轮次上限兜底,两者在结果里用 `exit_reason` 区分。
-- **可存活**:单个 Agent 抛异常不再中断整轮 —— 记下故障、把**在途消息送进死信队列**、连续到阈值就把这个成员摘除。在一个自主通信的群体里,「某个成员此刻不可用」是常态,不是意外。
+- **Convergence**: an agent cannot simply declare itself done. Quiescence requires a full round in which no agent received mail, **and the pending queue is empty**.
+- **Infinite loops**: message dedup + "ask any given question only once" + a hop limit, stacked three deep. Note that the dedup signature must include `relayed_by`, or hub-relayed messages get misjudged as duplicates and dropped.
+- **Controllability**: a total message budget that trips a circuit breaker so a runaway cannot burn through your API quota; a round cap backs it up. The result distinguishes the two via `exit_reason`.
+- **Survivability**: one agent throwing no longer aborts the round — the fault is recorded, **in-flight messages go to a dead-letter queue**, and a member that hits the consecutive-fault threshold is removed. In a group that communicates autonomously, "this member is unavailable right now" is the normal case, not an accident.
 
 ---
 
-## 三、演示场景
+## 3. The demo scenario
 
-根因分散在 4 个团队的私有信息里,任何单一 Agent 都不掌握全貌:
+The root cause is scattered across four teams' private knowledge. No single agent holds the whole picture:
 
 ```
-网关      只知道「不是我的问题,瓶颈在下游 DB 连接等待」
-数据库组  只知道「order_items 全表扫描」
-发布平台  只知道「v2.31 发布了,但没动 DDL」
-订单服务  只知道「v2.31 重写了查询谓词」
-                    ↓ 拼起来才是
-真正根因:谓词变了 → 原索引失效 → SeqScan → 连接池打满 → P99 劣化
+gateway      only knows "not my problem — the bottleneck is downstream, waiting on DB connections"
+database     only knows "order_items is doing a full table scan"
+release      only knows "v2.31 shipped, but it didn't touch DDL"
+ordersvc     only knows "v2.31 rewrote the query predicate"
+                    ↓ only assembled do you get
+actual root cause: predicate changed → old index no longer applies → SeqScan → connection pool saturates → P99 degrades
 ```
 
-关键在于**推理路径是动态生成的**:DBA 只有在拿到「本次发布没有 DDL」之后,才有理由去追问「那是不是查询语句变了」。这种「A 的结论决定 B 该问谁」的链条,正是中心化编排最难高效表达的。
+The key point is that **the reasoning path is generated dynamically**: only after the DBA learns "this release contained no DDL" does it have grounds to ask "then did the query statement itself change?" That chain — where A's conclusion determines whom B should ask — is exactly what centralized orchestration struggles to express efficiently.
 
-跑完会生成 `out/comparison.html`,包含拓扑演化图和完整的逐条消息序列。
+A run produces `out/comparison.html`, containing the topology-evolution diagram and the full message-by-message sequence.
 
 ---
 
-## 四、把环境做脏:一个反对自己的实验
+## 4. Dirtying the environment: an experiment against myself
 
-前面三节的场景是**照着结论设计**的:每个 topic 只有一个知情者,信息永远新鲜,答案永远自洽。于是「问对的人」就等于「拿到真相」,对等通信自然处处占优。
+The scenarios above were **designed to match the conclusion**: one knowledgeable party per topic, always-fresh information, always-consistent answers. Under those assumptions "ask the right person" equals "get the truth," so peer communication wins by default.
 
-真实环境不长这样。所以这一节反过来做:**把环境设计成对「对等更优」这个假设不利。**
+Real environments do not look like that. So this section does the opposite: **it deliberately makes the environment hostile to the hypothesis that peer is better.**
 
-注入五种脏东西:
+Five kinds of dirt, injected:
 
-| 脏东西 | 具体形式 | 它攻击的是什么 |
+| Dirt | Concrete form | What it attacks |
 |---|---|---|
-| 一个 topic 多个知情者 | `index_state` / `release_meta` / `rate_limit` 各有 2 个知情者 | 「问谁」不再等于「拿到真相」 |
-| 高置信度过期快照 | DBA 的 schema 快照 `conf=0.92`,但那是 100 个时间单位前的 | 只校验置信度的规则必然踩中 |
-| 表面冲突 | 发布平台「本次无 DDL」 vs 审计「有一条已回滚的 DDL」 | 单点信息永远自洽,交叉才见分歧 |
-| 低置信度干扰项 | 网关抛出一条传闻「限流变更可能是原因」`conf=0.60` | 不核实就会被带偏 |
-| 不可靠成员 | 订单服务正在救火,前两次提问一律不回 | 逼出「重试」这个 demo 里几乎从不出现的机制 |
+| Multiple knowledgeable parties per topic | `index_state` / `release_meta` / `rate_limit` each have 2 sources | "Ask the right one" no longer equals "get the truth" |
+| High-confidence stale snapshot | The DBA's schema snapshot at `conf=0.92` — but 100 time units old | Any rule that checks only confidence will fall for it |
+| Surface-level conflict | Release says "no DDL this time" vs audit says "there was one DDL, already rolled back" | Single-source information is always self-consistent; only cross-checking exposes disagreement |
+| Low-confidence distractor | The gateway floats a rumor — "the rate-limit change might be the cause," `conf=0.60` | Skimp on verification and you get led astray |
+| Unreliable member | Ordersvc is firefighting and ignores the first two questions | Forces out the retry mechanism, which almost never fires in the other demos |
 
-再加一个与拓扑**正交**的杠杆 —— 认知风格:
+Plus one lever **orthogonal** to topology — disposition:
 
-- `gullible`(轻信):每个 topic 只问**第一个**知情者,收到什么信什么
-- `skeptical`(怀疑):问遍所有知情者,比对置信度与时间戳,且**允许自我更正**
+- `gullible`: asks only the **first** source per topic, and believes whatever comes back
+- `skeptical`: asks every source, compares confidence and timestamps, and **allows self-correction**
 
 ```bash
-python run_dirty_demo.py     # 四组对比,打印对话全文 + 每人的认知账本
+python run_dirty_demo.py     # four configurations, printing the full transcript + each agent's cognition ledger
 ```
 
-结果:
+Results:
 
-| 认知风格 × 拓扑 | 轮次 | 业务消息 | 枢纽负载 | 横向 | 保真度 | 自我更正 | 采信过期 |
+| Disposition × topology | Rounds | Data msgs | Hub load | Lateral | Fidelity | Self-corrections | Stale accepted |
 |---|---|---|---|---|---|---|---|
-| 怀疑 × 对等 | 10 | 32 | 24 | 8 | **100%** | 1 | 0 |
-| 怀疑 × 星型 | 11 | 40 | 40 | 0 | **100%** | 1 | 0 |
-| 轻信 × 对等 | 10 | 23 | 19 | 4 | **50%** | 0 | 1 |
-| 轻信 × 星型 | 11 | 27 | 27 | 0 | **50%** | 0 | 1 |
+| skeptical × peer | 10 | 32 | 24 | 8 | **100%** | 1 | 0 |
+| skeptical × star | 11 | 40 | 40 | 0 | **100%** | 1 | 0 |
+| gullible × peer | 10 | 23 | 19 | 4 | **50%** | 0 | 1 |
+| gullible × star | 11 | 27 | 27 | 0 | **50%** | 0 | 1 |
 
-**结论与第一至三节正好相反,而这才是重点:**
+**The conclusion is the opposite of sections 1–3, and that is the whole point:**
 
-**1. 保真度由认知纪律决定,与拓扑无关。**
-轻信策略在对等和星型下都是 50%;怀疑策略在两种拓扑下都是 100%。三个争议话题上,怀疑策略三题全站对了权威记录,轻信策略三题全站错了 —— 而**换成对等拓扑,救不了不设防的认知。**
+**1. Fidelity is determined by epistemic discipline, not by topology.**
+The gullible disposition scores 50% under both peer and star; the skeptical disposition scores 100% under both. On all three contested topics, the skeptical strategy sided with the authoritative record every time, and the gullible strategy got it wrong every time — and **switching to a peer topology does nothing to save an undefended mind.**
 
-**2. 拓扑只决定「代价」,不决定「对错」。**
-星型比对等多付 25% 的通信量,并且这些开销全部压在枢纽身上(枢纽负载 40 对 24)。
+**2. Topology determines cost, not correctness.**
+Star pays 25% more traffic than peer, and all of that overhead lands on the hub (hub load 40 vs 24).
 
-**3. 「怀疑」不是免费的。**
-它多问、多比对:`32` 条业务消息 vs 轻信的 `23` 条。但它换来了 1 次关键的自我更正 —— 先采信了发布平台的「无 DDL」,拿到审计的逐条执行记录后才改口。轻信策略里这个数字是 `0`:**它连改口的机会都没有。**
+**3. Skepticism is not free.**
+It asks more and cross-checks more: `32` data messages vs gullible's `23`. But it buys one critical self-correction — it first accepted the release platform's "no DDL," then reversed itself once the audit's per-statement execution log arrived. In the gullible strategy that number is `0`: **it never even got the chance to change its mind.**
 
-所以更诚实的说法是:**对等通信的价值不在「更对」,而在「更省」,以及让关键信息绕开中心的上下文。**
+So the more honest statement is: **the value of peer communication is not being "more correct" — it is being "cheaper," and letting critical information bypass the centre's context.**
 
-跑完生成 `out/dirty.html`(争议裁决面板 + 每个 Agent 的认知账本)与 `out/dirty.json`。
-
----
-
-## 五、验证状态(请务必先读这段)
-
-**已验证**(有测试覆盖,`python -m unittest discover -s tests`):
-
-- 拓扑的预算、LRU 淘汰、BFS 最短路
-- 星型转述 / 对等直连 / 多跳路由三种投递路径
-- 三种拓扑都能得到相同根因,枢纽转述会丢失细节
-- 自适应拓扑能从稀疏起点自组织,且效率追平全连通
-- 挂起队列正确阻塞收敛判定
-- **脏环境**:高置信度过期快照与低置信度传闻被拒收、更高置信度到达时能自我更正、沉默成员被重试直到应答、重试报文不被去重误伤、枢纽不会吞掉过路消息
-- **保真度与拓扑无关**(脏环境下的核心结论):轻信/怀疑两种风格下,对等与星型的保真度完全一致
-- **模型输出的边界防御**:`to` 被规整为字符串列表(不会拆成幽灵收件人)、`kind` 限定在数据面白名单(拒绝控制面类型)、总线 `send()` 拒收控制面报文
-- **`LLMBrain` 的协议层**:prompt 渲染完整、HTTP 请求成形、响应解析容错(围栏代码块 / 夹杂解释文字 / 缺字段),且走完整协议后得到的**终报文本与轮次和规则大脑完全一致** —— 说明传输层没有引入失真
-- **运行时的可信性**(`test_runtime.py`):失败会被显式报出(`completed` / `ok` / `exit_reason` / `unresolved`),`describe_outcome()` 能区分「收敛 / 熔断 / 轮次耗尽」并点名每个 Agent 缺什么;单个成员崩溃不中断整轮且连续故障到阈值被摘除,在途消息进死信队列而非凭空蒸发;同一实例复跑被明确拒绝而非给出假成功;去重表有界(5000 条消息下仍只留窗口大小);两次同配置运行的消息序列逐字节相同,且首条编号固定为 `m00000`
-
-**未验证**(欢迎 PR):
-
-- ⚠️ **`LLMBrain` 从未接过真实模型。** 协议层已用本地桩服务验证通过(`python run_llm_demo.py`),但那证明的是「管线通」,不是「模型好」。真实模型会不会主动去问对的人、会不会把结论说清楚、会不会在拓扑里挑对邻居 —— 这些问题桩服务回答不了,也没有资格假装能回答。这是目前最想被别人先验证的部分。
-- ⚠️ **DirtyBrain 是写死的规则,不是真实认知。** 它证明了「置信度 + 新鲜度 + 交叉验证」这套机制能把脏数据拦下来,但没有证明真实 LLM 会这么做。把 `DirtyBrain` 换成会看 `Fact` 元数据的 LLM 大脑,是这个仓库下一个最该做的实验。
-- 演示场景是**合成的、规则驱动的**。它证明的是通信机制,不是「真实 LLM 团队协作效果」。
-- 单线程轮转调度,为的是让 trace 完全可复现。**没有做并发**,并发下的竞态未测。
-- 节点规模只有 5~6 个,没有测过几十上百个 Agent 时的路由与收敛表现。
-- `run_demo.py` / `run_dirty_demo.py` 里的「保真度」是关键词命中率,是个粗糙但可用的代理指标。
-
-**不适用 / 不要过度外推**:
-
-- **这是一个研究原型,不是生产就绪的库。** 它现在有了 `pyproject.toml`、CI(`.github/workflows/ci.yml`:测试矩阵 / 零依赖可用性 / 静态检查)以及 `ruff` + `mypy` 的静态门禁,但**工程完备 ≠ 结论可靠** —— 前几节的关键前提(单线程调度、合成场景、5~6 个节点)一条都没变。曾经被实测确认的几处**静默失效**已修复,并由 `test_runtime.py` 钉住:
-  - `Runtime.run()` 现在**拒绝重入** —— 第二次调用直接抛错并提示 `build()` 新实例,而不是给出一个「轮次 1、消息数照抄」的假成功;
-  - `MessageBus._seen` 改成**有界滑动窗口**(默认 4096),长跑不再无限吃内存;
-  - 补上了**故障隔离 + 死信队列** —— 单个 Agent 抛异常不再中断整轮,在途消息进死信而不是凭空蒸发;
-  - 结果里有了显式的**失败信号**:`completed` / `ok` / `exit_reason`(收敛 / 熔断 / 轮次耗尽)与逐 Agent 的 `unresolved`,不再只靠 `final_report == ""` 猜;
-  - `msg_id` 改为**确定性编号**(`m00000` 起),两次同配置运行可逐字节 diff。
-- 这不代表「对等一定优于中心化」。在需要强审计、强一致性、强可控性的场景,中心化有明显优势。这个仓库量化的是**通信效率与信息保真度**这一个维度。
-- 场景 A 是刻意设计成「孤岛式私有信息」的,这是对等通信收益最大的情形。信息本来就集中在一处时,横向通道没有价值。
-- 场景 B 反过来证明了另一面:**当环境变脏,决定成败的是每个 Agent 的信息纪律,而不是通信拓扑。** 所以「放开横向通信」既不是充分条件,也不是必要条件 —— 它只是在**信息本来就分散、且大家都愿意核实**时,能把代价降下来。
-- 5~6 个节点、几十条消息的实验规模,不要直接外推到生产系统。
+A run produces `out/dirty.html` (contested-claim adjudication panel + each agent's cognition ledger) and `out/dirty.json`.
 
 ---
 
-## 六、如何接真实模型
+## 5. Verification status (please read this section first)
 
-`run_llm_demo.py` 默认会自己起一个**符合 OpenAI 协议的本地桩服务**,所以不需要任何凭证就能验证协议层:
+**Verified** (covered by tests, `python -m unittest discover -s tests`):
+
+- Topology budget, LRU eviction, BFS shortest path
+- All three delivery paths: star relay / direct peer / multi-hop routing
+- All three topologies reach the same root cause; hub relaying loses detail
+- An adaptive topology self-organizes from a sparse start and matches full-mesh efficiency
+- The pending queue correctly blocks the convergence decision
+- **Dirty environment**: high-confidence stale snapshots and low-confidence rumors are rejected; a higher-confidence arrival triggers self-correction; a silent member is retried until it answers; retry messages are not wrongly caught by dedup; the hub does not swallow pass-through messages
+- **Fidelity is independent of topology** (the core dirty-environment result): under both gullible and skeptical dispositions, peer and star produce identical fidelity
+- **Boundary defence on model output**: `to` is normalized into a list of strings (it cannot be split into ghost recipients), `kind` is restricted to the data-plane whitelist (control-plane types are refused), and the bus's `send()` rejects control-plane messages
+- **The `LLMBrain` protocol layer**: prompt rendering is complete, the HTTP request takes shape, response parsing is fault-tolerant (fenced code blocks / explanatory prose mixed in / missing fields), and a full protocol run yields a **final report and round count byte-identical to the rule brain** — meaning the transport layer introduces no distortion
+- **Runtime trustworthiness** (`test_runtime.py`): failures are reported explicitly (`completed` / `ok` / `exit_reason` / `unresolved`); `describe_outcome()` distinguishes "converged / budget-tripped / round-capped" and names what each agent is missing; one member crashing does not abort the round, and a member hitting the consecutive-fault threshold is removed, with in-flight messages going to the dead-letter queue rather than evaporating; re-running the same instance is explicitly refused rather than yielding a fake success; the dedup table is bounded (5,000 messages still leaves only a window's worth); and two runs of the same configuration produce byte-identical message sequences, with the first ID fixed at `m00000`
+
+**Not verified** (PRs welcome):
+
+- ⚠️ **`LLMBrain` has never been connected to a real model.** The protocol layer is verified against the local stub server (`python run_llm_demo.py`), but that proves "the plumbing works," not "the model is good." Will a real model proactively ask the right party? Will it state its conclusion clearly? Will it pick the right neighbour in the topology? A stub server cannot answer those questions and has no business pretending it can. This is the part I most want someone else to verify first.
+- ⚠️ **`DirtyBrain` is a hard-coded rule, not real cognition.** It proves that the mechanism — confidence + freshness + cross-verification — can intercept dirty data. It does not prove a real LLM would behave that way. Swapping `DirtyBrain` for an LLM brain that reads `Fact` metadata is the single most valuable next experiment for this repo.
+- The demo scenarios are **synthetic and rule-driven**. They demonstrate a communication mechanism, not "what real LLM team collaboration looks like."
+- Scheduling is single-threaded round-robin, so that traces are fully reproducible. **There is no concurrency**, and races under concurrency are untested.
+- Node counts are only 5–6. Routing and convergence at tens or hundreds of agents are untested.
+- The "fidelity" metric in `run_demo.py` / `run_dirty_demo.py` is a keyword hit rate — crude, but usable as a proxy.
+
+**Not applicable / do not over-extrapolate**:
+
+- **This is a research prototype, not a production-ready library.** It now has a `pyproject.toml`, CI (`.github/workflows/ci.yml`: test matrix / zero-dep availability / static checks), and static gates from `ruff` + `mypy` — but **engineering completeness is not epistemic reliability**. None of the key premises from earlier sections (single-threaded scheduling, synthetic scenarios, 5–6 nodes) have changed. Several **silent failures** that were empirically confirmed have been fixed and pinned by `test_runtime.py`:
+  - `Runtime.run()` now **refuses re-entry** — a second call raises immediately and points you at `build()` for a fresh instance, instead of returning a fake success where round 1 reports a copied message count;
+  - `MessageBus._seen` became a **bounded sliding window** (default 4096), so long runs no longer grow memory without limit;
+  - **Fault isolation + a dead-letter queue** were added — one agent throwing no longer aborts the round, and in-flight messages go to dead letters rather than evaporating;
+  - Results now carry explicit **failure signals**: `completed` / `ok` / `exit_reason` (converged / budget-tripped / round-capped) plus per-agent `unresolved`, instead of forcing you to guess from `final_report == ""`;
+  - `msg_id` is now a **deterministic sequence** (starting at `m00000`), so two runs of the same configuration are byte-for-byte diffable.
+- This does **not** mean "peer is always better than centralized." Where strong auditing, strong consistency, or strong controllability matter, centralization has clear advantages. This repo quantifies exactly one dimension: **communication efficiency and information fidelity.**
+- Scenario A is deliberately built around "islands of private knowledge" — the case where peer communication pays off most. When information is already concentrated in one place, a lateral channel is worthless.
+- Scenario B demonstrates the opposite side: **once the environment is dirty, what decides the outcome is each agent's information discipline, not the communication topology.** So "open up lateral communication" is neither sufficient nor necessary — it only lowers the cost when **information is genuinely dispersed and everyone is willing to verify.**
+- An experiment at 5–6 nodes and a few dozen messages should not be extrapolated directly to production systems.
+
+---
+
+## 6. Connecting a real model
+
+`run_llm_demo.py` starts a **local stub server that speaks the OpenAI protocol** by default, so you can verify the protocol layer without any credentials:
 
 ```bash
-python run_llm_demo.py            # 用桩服务跑,不需要 key
+python run_llm_demo.py            # runs against the stub; no API key needed
 ```
 
-想换成真实模型,不用改代码:
+To switch to a real model, no code changes required:
 
 ```bash
 export OPENAI_API_KEY=sk-xxx
-export OPENAI_BASE_URL=https://api.openai.com/v1   # 可选
-export OPENAI_MODEL=gpt-4o-mini                     # 可选
+export OPENAI_BASE_URL=https://api.openai.com/v1   # optional
+export OPENAI_MODEL=gpt-4o-mini                     # optional
 python run_llm_demo.py --real
 ```
 
-或者把 `scenario_incident.py` 里 `build(brain_mode="llm")` 用在你自己的流程里 —— 通信层完全不用改。
+Or use `build(brain_mode="llm")` from `scenario_incident.py` in your own pipeline — the communication layer needs no changes at all.
 
-`LLMBrain` 约束模型必须返回严格的 JSON 数组,形如:
+`LLMBrain` requires the model to return a strict JSON array, like so:
 
 ```json
 [{"to": ["dba"], "kind": "QUERY", "topic": "slow_query", "content": "..."}]
 ```
 
-模型输出进入框架前会在 `_sanitize` 处被收敛,这是**唯一的入口,也是一条权限边界**:
+Before model output enters the framework it is normalized in `_sanitize` — **the single entry point, and a permission boundary**:
 
-- `to` 被规整成字符串列表。模型常写成 `"to": "dba"`,若直接 `tuple()` 会被拆成 `a/u/d/i/t` 五个幽灵收件人,真正该收的那位一条都收不到 —— **没有异常、没有日志,只表现为「对方没回我」**。
-- `kind` 必须落在**数据面白名单**(`DATA_KINDS`)。填控制面类型(`LINK_REQUEST` 等)一律丢弃,否则模型就能伪造建链请求、越过框架直接改写拓扑。
-- 解析失败(围栏代码块、夹杂解释文字、缺字段、类型不对)统一退化为「本轮不发消息」——**在一个自主通信的群体里,一个成员失语,比它把错误指令广播出去要好。**
+- `to` is normalized into a list of strings. Models often write `"to": "dba"`, and a naive `tuple()` over that produces five ghost recipients — `a/u/d/i/t` — while the one agent who should have received it gets nothing. **No exception, no log; it just looks like "they didn't answer me."**
+- `kind` must fall inside the **data-plane whitelist** (`DATA_KINDS`). Control-plane types (`LINK_REQUEST` and friends) are dropped outright — otherwise the model could forge a link request and rewrite the topology past the framework.
+- Any parse failure (fenced code blocks, mixed-in prose, missing fields, wrong types) degrades uniformly to "send nothing this round" — **in a group that communicates autonomously, a member going mute beats a member broadcasting bad instructions.**
 
-同一条边界在**总线**上还守了第二道:`MessageBus.send()` 直接拒收任何控制面报文。权限不能只靠大脑自觉。
-
----
-
-## 七、Roadmap
-
-- [ ] **接真实 LLM 跑通**,并对比规则大脑的差异(最高优先级)
-- [ ] **把 `DirtyBrain` 换成会读 `Fact` 元数据的 LLM 大脑**:现在的「怀疑」是写死的规则,想看看真实模型会不会自己去比对置信度和时间戳
-- [ ] 链路价值评估:把 LRU 换成「通信频次 × 信息增益」,让拓扑优化更主动
-- [ ] 跨会话拓扑记忆:现在的拓扑每跑一次都要从头长,还称不上有记忆
-- [ ] asyncio 并发版本,并补并发下的竞态测试
-- [ ] 引入信任度与信誉,让「谁值得连」成为动态博弈
-- [ ] 让信息随时间**自然腐化**(而不是靠预设的旧时间戳),观察团队如何重新达成一致
-- [ ] 更大规模的收敛性与路由开销压测
+The same boundary is enforced a second time at the **bus**: `MessageBus.send()` outright rejects any control-plane message. Permissions cannot rest on the brain's good behaviour alone.
 
 ---
 
-## 八、已知陷阱(踩过的坑)
+## 7. Roadmap
 
-留给后来者。下面每一条都是会让系统**静默失效**的那种 bug —— 没有异常、没有报错,只是结果悄悄变错。
+- [ ] **Get a real LLM running end-to-end**, and compare it against the rule brain (highest priority)
+- [ ] **Replace `DirtyBrain` with an LLM brain that reads `Fact` metadata**: today's "skepticism" is a hard-coded rule, and I want to see whether a real model will compare confidence and timestamps on its own
+- [ ] Link-value estimation: replace LRU with "communication frequency × information gain," so topology optimization becomes more proactive
+- [ ] Cross-session topology memory: right now the topology regrows from scratch on every run, which barely counts as memory
+- [ ] An asyncio concurrent version, plus race tests under concurrency
+- [ ] Introduce trust and reputation, so that "who is worth connecting to" becomes a dynamic game
+- [ ] Let information **decay naturally** over time (rather than via a preset old timestamp), and watch how a team re-reaches consensus
+- [ ] Larger-scale stress tests for convergence and routing overhead
 
-**基础设施层**
+---
 
-1. **`relayed_by == hub` 在 `hub is None` 时退化成 `None == None` 恒真**,导致所有消息绕过拓扑直投,动态拓扑完全失效。必须写成 `self.hub is not None and msg.relayed_by == self.hub`。
-2. **收敛判定漏掉挂起队列**。原本 `active == 0` 就判定稳定态,结果是正在等建链的消息会在静默瞬间被悄悄遗弃,终报保真度直接掉到 0。
-3. **建链请求丢失原始语义**。LINK_REQUEST 需要携带 `origin_kind`,否则收方无法区分「这是业务提问」和「这是在上报结论」,会把该接受的连接拒掉。
-4. **把「沉淀交付物」写进了大脑,而不是框架**。规则大脑会顺手往黑板写结论,LLM 大脑只会「说话」。结果换成 LLM 后终报凭空消失(保真度 0%),而消息流看起来完全正常。教训:**大脑只该决定「说什么」,框架才该决定「留下什么」。**
-5. **去重签名漏掉 `attempt`,把重试当成了重复消息。** 一个「问了没人答、过一会儿再问」的重试,正文和首次一字不差 —— 于是被去重逻辑直接吞掉,表现是「系统很安静,但问题没解决」。去重要拦的是「同一条消息绕圈回来」,不是「我再试一次」。
-6. **时效模型用绝对刻度会自己骗自己。** 原本 `as_of=0` 表示「当前」、`now` 取轮次,跑到第 60 轮时连刚产生的信息都算过期了。改成 `as_of=None` 表示实时、**在出网那一刻才盖章**成绝对刻度 —— 一条「当前情况」在说出口之前本来就无所谓时间戳。
+## 8. Known pitfalls (scars earned)
 
-**认知层**
+Left here for whoever comes next. Every one of these is the kind of bug that makes a system **fail silently** — no exception, no error, just a result that quietly goes wrong.
 
-7. **「静默检测」和「重试等待」之间存在死区。** 这是最隐蔽的一个。`has_pending_work` 原本只在「距上次提问已满 2 轮、可以重试了」才返回 `True`;可是在等待的那一轮里 Agent 不会被唤醒,运行时看到 `active == 0` 就判定收敛、直接收工 —— **重试窗口还没打开,系统就自己宣告结束了。** 教训:判断「有没有未了结的提问」,而不是判断「现在是不是重试的时机」。**「还欠着一件事」本身,就是「不该收敛」的理由。**
-8. **空信箱不该拦住大脑。** `Agent.step` 原本在 `batch` 为空时直接 `return []`,而重试逻辑写在 `think()` 里。于是调度器因为「大脑自认还有事」唤醒了它,`step` 一看信箱是空的又把它打发走了 —— `think` 从头到尾没被调用过。两个模块各自都「正确」,拼在一起就失效。
-9. **枢纽角色必须真的转发。** `DirtyBrain` 一开始没处理 `relay_to`,被拓扑挡住、交给枢纽代投的消息就**在枢纽处静默消失**了。外部只看到「下游拿不到信息」,极难定位到「中继把过路消息吃了」。
-10. **`dict.get(key, [])` 给的是一个游离的空列表。** 拿它的长度当尝试编号,会得到 `0, 2, 3` 这种不连续的序列(首次拿到的是 0 而非 1)。要取就取 `setdefault` 真正存进去的那个列表。
+**Infrastructure layer**
 
-**边界与权限**
+1. **`relayed_by == hub` degenerates to `None == None` — vacuously true — when `hub is None`**, causing every message to bypass the topology and go direct, which nullifies dynamic topology entirely. It must be written as `self.hub is not None and msg.relayed_by == self.hub`.
+2. **The convergence check forgot the pending queue.** Originally `active == 0` alone declared quiescence, so messages waiting on link negotiation were quietly abandoned at the moment of silence, and final-report fidelity dropped straight to 0.
+3. **Link requests lost their original semantics.** `LINK_REQUEST` needs to carry `origin_kind`; without it the receiver cannot tell "this is a business question" from "this is reporting a conclusion," and rejects connections it should have accepted.
+4. **Putting "persisting the deliverable" into the brain instead of the framework.** The rule brain happened to write its conclusion to the blackboard; the LLM brain only "speaks." Swap in the LLM and the final report vanishes into thin air (fidelity 0%) — while the message flow looks perfectly normal. Lesson: **a brain decides *what to say*; only the framework decides *what to keep*.** 
+5. **The dedup signature omitted `attempt`, so a retry was treated as a duplicate.** A retry — "asked, got no answer, ask again later" — has a body identical to the first request character for character, so dedup swallowed it outright. The symptom: "the system is very quiet, but the problem isn't solved." Dedup should catch *a message looping back around*, not *me trying again*.
+6. **An absolute-scale freshness model lies to itself.** Originally `as_of=0` meant "now" and `now` was the round number, so by round 60 even freshly produced information counted as stale. Changed to `as_of=None` meaning live, **stamped to an absolute scale only at the moment it goes out on the wire** — a statement about "current conditions" has no meaningful timestamp until the moment it's spoken.
 
-11. **模型输出没有类型校验,`"to": "audit"` 被拆成了字符序列。** `tuple("audit")` 得到 `('a','u','d','i','t')`,消息投给了五个不存在的收件人,**真正的 audit 一条都收不到**。全程无异常、无日志,只表现为「对方没回我」——这类静默错投比崩溃难查得多。
-12. **模型可以伪造控制面报文,越权改写拓扑。** `kind` 没有白名单,模型只要吐出 `{"kind":"LINK_REQUEST"}` 就能触发总线的建链流程,成功建立一条本不该存在的链路。**「模型只能决定跟谁说什么、不能改动框架」这句话,必须靠代码兑现,而不是靠 prompt 里写一句「请你不要」。** 修复要在两个地方各守一道:LLM 解析层收敛 + 总线 `send()` 拒收控制面报文。
-13. **`assert` 不是错误处理。** `_deliver_control` 里原本写着 `assert self.topology is not None`,而 `assert` 在 `python -O` 下会被整个剥掉 —— 一条本该优雅退场的分支,变成了「只有生产环境才炸」的隐藏地雷。该提前返回就提前返回。
+**Cognition layer**
 
-**工程化(让它可被信任)**
+7. **A dead zone between "silence detection" and "retry wait."** This is the subtlest one. `has_pending_work` originally returned `True` only once "2 rounds have passed since the last question, so retry is allowed." But during the waiting round the agent isn't woken at all, so the runtime sees `active == 0`, declares convergence, and calls it a day — **the system declared itself finished before the retry window even opened.** Lesson: test for "is there an unresolved question?" rather than "is now the right moment to retry?" **"Still owing something" is itself a reason not to converge.**
+8. **An empty mailbox should not stop the brain.** `Agent.step` originally returned `[]` immediately when `batch` was empty, while the retry logic lives in `think()`. So the scheduler woke the agent because "the brain says it still has work," and `step` — seeing an empty mailbox — sent it straight back to sleep. `think` was never called at all. Two modules, each individually "correct," broken the moment you plug them together.
+9. **The hub role must actually forward.** `DirtyBrain` initially didn't handle `relay_to`, so messages blocked by the topology and handed to the hub **silently disappeared at the hub.** From the outside you only see "downstream isn't getting the information," and it is extremely hard to trace back to "the relay ate the pass-through message."
+10. **`dict.get(key, [])` hands you a detached empty list.** Using its length as an attempt number yields a non-contiguous sequence like `0, 2, 3` (the first attempt reads as 0 rather than 1). Take the list that `setdefault` actually stored instead.
 
-14. **可重入的运行时 = 假成功。** `Runtime.run()` 曾可以被调用第二次:Agent 的大脑、黑板、总线、拓扑全是有状态的,第二次跑出来的是「轮次 1、消息数照抄」——**没有异常,数字也齐,只是什么都没流动**(全被去重吃掉了)。这类假成功比崩溃难发现得多。修复是加一个 `_ran` 守卫,并在报错里直接告诉人「请重新 `build()`」。
-15. **「没结案」不能让调用方自己去猜。** 需求永远凑不齐时,框架以前会安静地吐一份空报告,只能靠 `final_report == ""` 察觉 —— 而一个空字符串既可能是失败,也可能只是「还没跑到」。现在结果里带 `completed` / `exit_reason`,并提供一个 `describe_outcome()` 把「成没成、卡在哪」直接说成人话。
-16. **「还欠着一件事」和「崩了」要分开报。** 失败不等于有异常;同样,「什么都不做」也不等于故障。结果里用 `unresolved`(还缺什么前提)和 `faults`(谁抛了什么)两条独立通道描述,避免把「安静的空结果」误当成「任务本来就没东西可做」。
-17. **一个成员崩溃不该拖垮整队。** 在一个自主通信的群体里,「某个成员此刻不可用」是常态,不是意外。现在 `Agent.process` 外面包了一层异常边界:记故障、连续到阈值就摘除该成员,其余人继续跑。
-18. **在途消息不能凭空蒸发。** 故障发生时,那批消息**已经从信箱里取出来了** —— 如果只是 `continue` 往下走,它们就消失了,而「消息凭空消失」正是这个项目里最难查的一类 bug。修复:进死信队列,并在结果里报出条数。
-19. **无界的记忆就是内存泄漏。** 去重表 `_seen` 原本无限累积,5000 条消息就常驻 5000 条记录。去重要拦的是「短窗口内的绕圈」,所以滑动窗口完全够用 —— 这是用**有限记忆**换**不泄漏**。代价是窗口外的老签名会被挤掉(刻意的:不能让一个 Agent 永远不能再说同一句话)。
-20. **uuid 让 trace 可复现,却不可 diff。** 内容一样、编号不同,就没法用 `diff` 找出两次运行在哪一条上分叉。改成进程内自增的确定性编号(`m00000` 起),并在构造 `Runtime` 时归零 —— 归零点必须早于**这个实验产生的第一条消息**,所以放在 `__init__` 而不是 `run()` 里(开场消息发生在 `run()` 之前)。
+**Boundaries and permissions**
+
+11. **No type validation on model output — `"to": "audit"` got split into a sequence of characters.** `tuple("audit")` yields `('a','u','d','i','t')`, and the message was delivered to five non-existent recipients, with **the real `audit` receiving nothing at all.** No exception, no log; it just looks like "they didn't answer me." This class of silent misdelivery is far harder to trace than a crash.
+12. **The model could forge control-plane messages and rewrite the topology past the framework.** With no whitelist on `kind`, a model only needed to emit `{"kind":"LINK_REQUEST"}` to trigger the bus's link negotiation and successfully establish a link that should never have existed. **The sentence "the model decides whom to talk to and what to say, but cannot modify the framework" has to be enforced by code, not by writing "please don't" in the prompt.** The fix guards two places: normalization in the LLM parse layer, plus the bus refusing control-plane messages in `send()`.
+13. **`assert` is not error handling.** `_deliver_control` originally read `assert self.topology is not None`, and `assert` is stripped entirely under `python -O` — turning a branch that should have exited gracefully into a landmine that only detonates in production. If you mean to return early, return early.
+
+**Engineering (making it trustworthy)**
+
+14. **A re-entrant runtime equals fake success.** `Runtime.run()` could once be called a second time: the agents' brains, the blackboard, the bus, and the topology are all stateful, and a second run produced "round 1, message count copied" — **no exception, every number present, and nothing actually flowing** (dedup ate it all). This class of fake success is far harder to detect than a crash. The fix is a `_ran` guard whose error message tells you to `build()` a new instance.
+15. **"Didn't close out" must not be left for the caller to guess.** When requirements could never be satisfied, the framework used to quietly emit an empty report that you could only detect via `final_report == ""` — and an empty string could mean failure *or* simply "hasn't got there yet." Results now carry `completed` / `exit_reason`, plus a `describe_outcome()` that states plainly whether it closed out and, if not, where it stalled.
+16. **"Still owes something" and "crashed" must be reported separately.** Failure is not the same as an exception; likewise, "did nothing" is not the same as a fault. Results describe these on two independent channels — `unresolved` (what premises are missing) and `faults` (who threw what) — so a quiet empty result isn't mistaken for "there was nothing to do."
+17. **One member crashing should not take down the whole team.** In a group that communicates autonomously, "this member is unavailable right now" is the normal case. `Agent.process` now sits inside an exception boundary: record the fault, remove the member once consecutive faults hit the threshold, and let everyone else keep running.
+18. **In-flight messages must not evaporate.** When a fault occurs, that batch of messages **has already been taken out of the mailbox** — so simply `continue`-ing past it makes them disappear, and "messages vanishing into thin air" is the single hardest class of bug in this project to trace. The fix: route them to the dead-letter queue and report the count in the result.
+19. **Unbounded memory is a memory leak.** The dedup table `_seen` originally accumulated without limit — 5,000 messages meant 5,000 resident records. Dedup exists to catch loops *within a short window*, so a sliding window is entirely sufficient — trading **bounded memory** for **no leak**. The cost is that older signatures outside the window get evicted (deliberately: an agent must never be permanently barred from saying the same thing again).
+20. **uuid makes a trace reproducible but not diffable.** Same content, different IDs, and you cannot use `diff` to find which message two runs diverged on. Changed to a process-local incrementing deterministic ID (starting at `m00000`), zeroed when a `Runtime` is constructed — and the zeroing point must precede **the first message this experiment produces**, which is why it lives in `__init__` rather than `run()` (the kickoff happens before `run()`).
 
 ---
 
 ## License
 
-MIT,见 [LICENSE](LICENSE)。
+MIT, see [LICENSE](LICENSE).
