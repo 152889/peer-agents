@@ -236,7 +236,7 @@ class TestLLMBrain(unittest.TestCase):
         joined = "\n".join(prompts)
         for section in ("# 你的身份", "# 你掌握的私有信息", "# 团队共享黑板", "# 可用 topic", "# 输出格式", "# 本轮收到的消息"):
             self.assertIn(section, joined, f"prompt 缺少段落：{section}")
-        self.assertIn("slow_query → 负责人 dba", joined, "prompt 里应带上通讯录")
+        self.assertIn("slow_query → 知情者 dba", joined, "prompt 里应带上通讯录")
 
     def test_request_is_well_formed(self):
         runtime, _ = build(topology="peer", brain_mode="llm")

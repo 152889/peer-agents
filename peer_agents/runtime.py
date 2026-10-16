@@ -122,11 +122,16 @@ class Runtime:
 
         for rnd in range(1, self.max_rounds + 1):
             result.rounds = rnd
+            self.board.round = rnd   # 让大脑能判断信息的「新鲜度」
             # 先重试上一轮因不可达而挂起的消息（此时可能已协商出新的链路）
             self.bus.retry_pending()
             active = 0
             for agent in self.agents:
-                if agent.inbox == 0:
+                # 唤醒条件有两个：信箱里有信，或者大脑手上还有没做完的事
+                #（比如「问了没人答」正在等超时重试）。少了后者，那些消息
+                # 会随着静默检测一起被埋掉。
+                pending = getattr(agent.brain, "has_pending_work", None)
+                if agent.inbox == 0 and not (pending and pending(self.board)):
                     continue
                 active += 1
                 for msg in agent.step(self.board):

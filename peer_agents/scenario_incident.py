@@ -51,12 +51,12 @@ _TITLES = {
 LINK_BUDGET = 3
 
 DIRECTORY = {
-    T_SCOPE: "gateway",
-    T_SLOWQ: "dba",
-    T_RELEASE: "deploy",
-    T_QUERYCHG: "ordersvc",
-    T_ROOTCAUSE: "dba",
-    T_REPORT: "sre",
+    T_SCOPE: ["gateway"],
+    T_SLOWQ: ["dba"],
+    T_RELEASE: ["deploy"],
+    T_QUERYCHG: ["ordersvc"],
+    T_ROOTCAUSE: ["dba"],
+    T_REPORT: ["sre"],
 }
 
 # 判定信息保真度用的关键 token：一旦枢纽转述时丢细节，这些词就会从终报里消失

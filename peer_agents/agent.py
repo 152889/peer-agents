@@ -34,9 +34,15 @@ class Agent:
         return self.bus.mail_count(self.id)
 
     def step(self, board: Blackboard) -> list[Message]:
+        """轮转一次。
+
+        即便信箱是空的，也要把「空批次」交给大脑 —— 因为大脑手上可能有
+        与收信无关的未了之事，最典型的就是「问了没人答，过一会儿要重试」。
+
+        调度器只在「有信」或「大脑自认还有事」时才轮到这里（见 Runtime），
+        所以这次调用不会让空闲 Agent 空转。
+        """
         batch = self.bus.take(self.id)
-        if not batch:
-            return []
         return self.brain.think(self, batch, board)
 
     def __repr__(self) -> str:  # pragma: no cover

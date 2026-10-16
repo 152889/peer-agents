@@ -108,7 +108,7 @@ class LLMBrain:
     # ------------------------------------------------------------------
     def _render(self, agent: Agent, batch: list[Message], board: Blackboard) -> str:
         inbox = "\n".join(f"[{m.kind}:{m.topic}] {m.sender} → 你: {m.content}" for m in batch) or "（无）"
-        topics = "\n".join(f"- {t} → 负责人 {o}" for t, o in board.registry.items())
+        topics = "\n".join(f"- {t} → 知情者 {', '.join(o)}" for t, o in board.registry.items())
         system = SYSTEM_TEMPLATE.format(
             persona=self.persona,
             skills=json.dumps(self.skills, ensure_ascii=False, indent=2),

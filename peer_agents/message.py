@@ -45,6 +45,7 @@ class Message:
     msg_id: str = field(default_factory=lambda: uuid.uuid4().hex[:6])
     reply_to: str | None = None
     hop: int = 0
+    attempt: int = 0             # 第几次尝试（0 = 首次）。重试是「新的一次发送」
     relay_to: str | None = None
     relayed_by: str | None = None
     path: tuple[str, ...] = ()   # 本次投递实际穿过的节点序列（多跳路由留痕）
@@ -73,6 +74,10 @@ class Message:
         注意必须把 ``relayed_by`` 纳入签名：枢纽代投出来的报文，其
         sender/recipients/kind/topic/content 与原始报文完全一致，若不加这个
         维度就会被去重逻辑误判为重复投递而丢弃，中转链会直接断掉。
+
+        同理必须纳入 ``attempt``：一个「问了没人答、过一会儿再问」的重试，
+        正文一字不差，可它是**一次全新的发送**，不是同一条消息绕了回来。
+        去重要拦的是「绕圈」，不是「再试一次」。
         """
         return (
             self.sender,
@@ -81,4 +86,5 @@ class Message:
             self.topic,
             self.content,
             self.relayed_by,
+            self.attempt,
         )
