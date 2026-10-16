@@ -12,7 +12,8 @@ The answer turns out to be quantifiable, and a little counterintuitive. The whol
 python run_demo.py            # five topologies compared, runs in ~0.1s
 python run_dirty_demo.py      # four dirty-environment configs: stale data / rumor / silent member
 python run_llm_demo.py        # end-to-end LLM protocol run (bundles a local stub server)
-python -m unittest discover -s tests    # 72 regression tests
+python run_wire_demo.py       # a Node agent joins the same run over a socket (needs node >= 18)
+python -m unittest discover -s tests    # 159 regression tests
 ```
 
 ---
@@ -53,10 +54,14 @@ peer-agents/
 ├── run_demo.py                 entry point for the five-configuration comparison
 ├── run_dirty_demo.py           dirty-environment entry point (full transcript + cognition ledgers)
 ├── run_llm_demo.py             end-to-end LLM protocol demo (switchable to a real model)
+├── run_wire_demo.py            cross-language demo: the `deploy` member runs as a Node process over a socket
 ├── pyproject.toml              packaging + pytest/ruff/mypy config (zero runtime dependencies)
-├── .github/workflows/ci.yml    CI: test matrix / zero-dep availability / static checks
+├── .github/workflows/ci.yml    CI: test matrix / zero-dep availability / cross-language interop / static checks
+├── docs/
+│   └── PROTOCOL.md             the wire protocol, v1: framing / frames / field permissions (one page)
 ├── tools/
-│   └── mock_llm_server.py      local LLM stub server (used to verify the protocol layer)
+│   ├── mock_llm_server.py      local LLM stub server (used to verify the protocol layer)
+│   └── peer_agent.mjs          zero-dependency Node reference implementation of the wire protocol
 ├── peer_agents/
 │   ├── message.py              immutable message model (addressable / forwardable / multi-hop)
 │   ├── bus.py                  message bus: delivery + topology control + routing + link negotiation
@@ -65,6 +70,9 @@ peer-agents/
 │   ├── agent.py                agent shell + pluggable brain
 │   ├── runtime.py              event loop + convergence / circuit-breaker / fault-isolation guardrails
 │   ├── facts.py                facts carrying metadata: confidence / timestamp / evidence / source
+│   ├── wire.py                 wire protocol: NDJSON framing + the writable / reject / overwrite field boundary
+│   ├── transport.py            synchronous, thread-free transport (host drives; one round-trip in flight)
+│   ├── remote.py               mount a remote process as a brain (it only decides what to send; the host keeps the bus and topology)
 │   ├── scenario_incident.py     scenario A: distributed triage of a production incident (clean)
 │   ├── scenario_dirty.py       scenario B: the same incident, with the environment dirtied
 │   ├── brain_dirty.py          dispositions: gullible / skeptical (with self-correction and retry)
@@ -74,7 +82,10 @@ peer-agents/
 └── tests/
     ├── test_peer_agents.py     30 tests: communication-mechanism regressions
     ├── test_dirty.py           24 tests: dirty-environment mechanism regressions
-    └── test_runtime.py         18 tests: runtime trustworthiness (failure visibility / fault isolation / re-entrancy / determinism)
+    ├── test_runtime.py         18 tests: runtime trustworthiness (failure visibility / fault isolation / re-entrancy / determinism)
+    ├── test_wire.py            52 tests: the wire protocol's framing and field-permission boundary
+    ├── test_remote.py          28 tests: a remote brain driving the framework over a socket
+    └── test_interop.py          7 tests: a real Node process running the same scenario end to end
 ```
 
 ### Three design decisions
@@ -183,6 +194,9 @@ A run produces `out/dirty.html` (contested-claim adjudication panel + each agent
 - **Boundary defence on model output**: `to` is normalized into a list of strings (it cannot be split into ghost recipients), `kind` is restricted to the data-plane whitelist (control-plane types are refused), and the bus's `send()` rejects control-plane messages
 - **The `LLMBrain` protocol layer**: prompt rendering is complete, the HTTP request takes shape, response parsing is fault-tolerant (fenced code blocks / explanatory prose mixed in / missing fields), and a full protocol run yields a **final report and round count byte-identical to the rule brain** — meaning the transport layer introduces no distortion
 - **Runtime trustworthiness** (`test_runtime.py`): failures are reported explicitly (`completed` / `ok` / `exit_reason` / `unresolved`); `describe_outcome()` distinguishes "converged / budget-tripped / round-capped" and names what each agent is missing; one member crashing does not abort the round, and a member hitting the consecutive-fault threshold is removed, with in-flight messages going to the dead-letter queue rather than evaporating; re-running the same instance is explicitly refused rather than yielding a fake success; the dedup table is bounded (5,000 messages still leaves only a window's worth); and two runs of the same configuration produce byte-identical message sequences, with the first ID fixed at `m00000`
+- **The wire protocol** (`test_wire.py`, 52 cases): framing round-trips, blank lines are skipped as heartbeats, half a line followed by EOF is a protocol error rather than "nothing arrived", a reader refuses to buffer past 1 MiB, version mismatch is refused instead of limped through, and unknown capabilities are rejected rather than silently granted. Every field a peer may write has a test; so does every field it may not — `sender`, `relayed_by`, `origin_kind` reject the whole frame, and `relay_to` is accepted only from a peer the host has designated as the hub, with `relayed_by` still derived by the host and never read off the wire. `to` given as a bare string is **refused, not split**
+- **Remote brains really drive the framework** (`test_remote.py`, 28 cases): a brain on the far side of a socket produces messages that carry the framework's identity and ID scheme; the peer cannot send a control-plane kind or forge `relayed_by` without the exception reaching `RunResult.faults`; a declared capability really results in the question being forwarded over the wire, and an undeclared one is answered by the host's default policy; a broken link negotiation is a *rejection*, not a crash; and a remote that dies is isolated, evicted at the fault threshold, its in-flight messages dead-lettered, and the missing premise named in `unresolved`
+- **Cross-language interop is real** (`test_interop.py`): a genuine Node process (`tools/peer_agent.mjs`, zero npm dependencies) completes the handshake, answers a `think` frame, decides link requests when it declares `accepts_link`, and drives a full run to completion — with the final report, round count, message count, fidelity and topology evolution all identical to the all-Python run. A node process that receives an unknown frame exits with a distinct code rather than pretending nothing happened
 
 **Not verified** (PRs welcome):
 
@@ -192,10 +206,13 @@ A run produces `out/dirty.html` (contested-claim adjudication panel + each agent
 - Scheduling is single-threaded round-robin, so that traces are fully reproducible. **There is no concurrency**, and races under concurrency are untested.
 - Node counts are only 5–6. Routing and convergence at tens or hundreds of agents are untested.
 - The "fidelity" metric in `run_demo.py` / `run_dirty_demo.py` is a keyword hit rate — crude, but usable as a proxy.
+- ⚠️ **Only Python ↔ Node has ever interoperated.** "Any language can implement this" is *inferred from the spec*, not a verified fact — writing a third implementation and wiring it into `test_interop.py` is what would make it one. The wire layer is plaintext, unauthenticated and loopback-only; identity is decided by whoever connects to the seat first, so any process on the machine can impersonate a member. Treat it as a research transport, not as something to expose on a network.
+- The wire layer handles **one peer per session** (the host's `accept()` is synchronous), and there is no reconnect — a dropped connection is recorded as a fault and the member is evicted at the threshold.
+- The remote brain is a "answer what you're asked" reference implementation: it does not reason, follow up, or conclude. Handing it a role like `dba` (which must chase a chain of inference) will not produce a root cause. That is a limit of the reference implementation, not of the protocol.
 
 **Not applicable / do not over-extrapolate**:
 
-- **This is a research prototype, not a production-ready library.** It now has a `pyproject.toml`, CI (`.github/workflows/ci.yml`: test matrix / zero-dep availability / static checks), and static gates from `ruff` + `mypy` — but **engineering completeness is not epistemic reliability**. None of the key premises from earlier sections (single-threaded scheduling, synthetic scenarios, 5–6 nodes) have changed. Several **silent failures** that were empirically confirmed have been fixed and pinned by `test_runtime.py`:
+- **This is a research prototype, not a production-ready library.** It now has a `pyproject.toml`, CI (`.github/workflows/ci.yml`: test matrix / zero-dep availability / cross-language interop / static checks), and static gates from `ruff` + `mypy` — but **engineering completeness is not epistemic reliability**. None of the key premises from earlier sections (single-threaded scheduling, synthetic scenarios, 5–6 nodes) have changed. Several **silent failures** that were empirically confirmed have been fixed and pinned by `test_runtime.py`:
   - `Runtime.run()` now **refuses re-entry** — a second call raises immediately and points you at `build()` for a fresh instance, instead of returning a fake success where round 1 reports a copied message count;
   - `MessageBus._seen` became a **bounded sliding window** (default 4096), so long runs no longer grow memory without limit;
   - **Fault isolation + a dead-letter queue** were added — one agent throwing no longer aborts the round, and in-flight messages go to dead letters rather than evaporating;
@@ -243,20 +260,114 @@ The same boundary is enforced a second time at the **bus**: `MessageBus.send()` 
 
 ---
 
-## 7. Roadmap
+## 7. Talking to agents written in another language
 
+For most of this project's life, "agents talk to each other" meant one Python object being
+appended to another Python list. That is the easiest possible case of the problem this repo
+is about: no serialization, no partial reads, no peer disappearing, no version skew. Move the
+boundary onto a socket and all four show up at once.
+
+So there is now a wire protocol — [`docs/PROTOCOL.md`](docs/PROTOCOL.md), one page, complete
+enough to implement from — plus a zero-dependency Node reference implementation in
+[`tools/peer_agent.mjs`](tools/peer_agent.mjs):
+
+```bash
+python run_wire_demo.py     # needs node >= 18
+```
+
+### The one design decision that matters
+
+A remote process does **not** get its own message bus, its own view of the topology, or a vote
+on the framework. It is **a brain on the far side of a socket**: it sees a mailbox, and it says
+what it wants to send. Nothing else.
+
+That single choice is what keeps the whole thing verifiable:
+
+| It can | It cannot |
+|---|---|
+| choose recipients (`to`) | choose who it **is** — `sender` comes from the session |
+| choose a data-plane `kind` | send a control-plane message (`LINK_REQUEST` and friends) |
+| choose what to say (`topic` / `content`) | claim "I was already relayed by the hub" (`relayed_by`) |
+| `reply_to` a message | choose its own position in the trace (`id`) |
+
+A remote agent therefore inherits **exactly** the privileges of `LLMBrain` — not one line of the
+framework had to be loosened. Topology is still grown and pruned by `Topology` and `MessageBus`
+on the host side. The most a peer can do is answer the question "would you accept a direct link
+to me?" — and even then the link budget and LRU eviction stay with the host, so answering
+"yes" does not buy it a bigger budget.
+
+### The security model falls straight out of §9
+
+Two entries in the pitfall list are the entire reason the field whitelist exists:
+
+- **#1**: `relayed_by == hub` is the fast path that bypasses topology completely. If a peer
+  could set `relayed_by`, it would be holding a topology bypass in a single field.
+- **#12**: a model that can emit `{"kind": "LINK_REQUEST"}` can rewrite the topology past the
+  framework.
+
+Both apply at full strength once the sender is an arbitrary process. So the fields of a `say`
+frame are split three ways — **writable / reject the whole frame / silently overwritten** —
+with one test per field in `test_wire.py`. The rule is deliberately *not* "ignore anything
+unexpected", because silently ignoring a privilege escalation is how the peer ends up believing
+it succeeded — which is precisely the failure class §9 exists to hunt. The one exception is
+`relay_to`, and it is conditional: only a peer the host has designated as hub may set it, and
+even then `relayed_by` is *derived* by the host from the peer's identity, never read off the
+wire.
+
+`to` given as a bare string is **refused, not split**. `tuple("audit")` is `('a','u','d','i','t')`
+— five ghost recipients, and the one agent who should have received the message gets nothing.
+No exception, no log, just "they never got back to me". Pitfall #11, now on the wire.
+
+### What the demo actually proves
+
+`run_wire_demo.py` does not print "it worked". It runs the incident-triage scenario **twice** —
+once all-Python, once with the **`deploy` member replaced by a Node process** — and then compares
+them item by item:
+
+```
+[✓] final report identical          [✓] both runs actually completed
+[✓] round count identical           [✓] no faults in either run
+[✓] data-message count identical    [✓] topology evolution identical
+[✓] fidelity identical              [✓] message sequence identical, line by line
+```
+
+`deploy` was not picked at random. In this scenario it does exactly one thing: when asked about
+`release_meta`, it answers. The Node reference implementation does exactly that and nothing more,
+so the two are **behaviourally equivalent** — any difference can only come from "it went over a
+socket", never from "it did a different job". Swapping `dba` instead would not work: `dba` has to
+follow a chain of inference, and the reference implementation deliberately contains no reasoning.
+Comparing those two would measure a difference in *decision-making* rather than in *communication*,
+which would prove nothing.
+
+Two smaller decisions worth naming. First, the transport layer uses **no threads at all** — the
+host drives and every round-trip is synchronous, which keeps the "no concurrency, races untested"
+boundary in §5 exactly where it was instead of quietly building on top of it. Second, CI runs the
+interop suite as its own job with `PEER_AGENTS_REQUIRE_NODE=1`, so a missing node is a **failure**
+rather than a skip. A skipped interop test is an interop test that stopped existing.
+
+---
+
+## 8. Roadmap
+
+- [x] **A wire protocol, so agents can be written in other languages** — see §7
+- [ ] **A third language implementation** (Go / Rust / anything), wired into `tests/test_interop.py`
+      so "any language can join" stops being an inference and becomes a verified fact
+- [ ] **Peer authentication**, so the wire layer is no longer loopback-only
+- [ ] **Many peers per session** (today the host's `accept()` is synchronous and handles one)
 - [ ] **Get a real LLM running end-to-end**, and compare it against the rule brain (highest priority)
 - [ ] **Replace `DirtyBrain` with an LLM brain that reads `Fact` metadata**: today's "skepticism" is a hard-coded rule, and I want to see whether a real model will compare confidence and timestamps on its own
 - [ ] Link-value estimation: replace LRU with "communication frequency × information gain," so topology optimization becomes more proactive
 - [ ] Cross-session topology memory: right now the topology regrows from scratch on every run, which barely counts as memory
-- [ ] An asyncio concurrent version, plus race tests under concurrency
+- [ ] An asyncio concurrent version, plus race tests under concurrency. Note this is about the
+      *scheduler*: the wire layer was deliberately kept synchronous and thread-free so that this
+      work has exactly one place to happen
 - [ ] Introduce trust and reputation, so that "who is worth connecting to" becomes a dynamic game
 - [ ] Let information **decay naturally** over time (rather than via a preset old timestamp), and watch how a team re-reaches consensus
 - [ ] Larger-scale stress tests for convergence and routing overhead
 
 ---
 
-## 8. Known pitfalls (scars earned)
+## 9. Known pitfalls (scars earned)
 
 Left here for whoever comes next. Every one of these is the kind of bug that makes a system **fail silently** — no exception, no error, just a result that quietly goes wrong.
 
@@ -291,6 +402,12 @@ Left here for whoever comes next. Every one of these is the kind of bug that mak
 18. **In-flight messages must not evaporate.** When a fault occurs, that batch of messages **has already been taken out of the mailbox** — so simply `continue`-ing past it makes them disappear, and "messages vanishing into thin air" is the single hardest class of bug in this project to trace. The fix: route them to the dead-letter queue and report the count in the result.
 19. **Unbounded memory is a memory leak.** The dedup table `_seen` originally accumulated without limit — 5,000 messages meant 5,000 resident records. Dedup exists to catch loops *within a short window*, so a sliding window is entirely sufficient — trading **bounded memory** for **no leak**. The cost is that older signatures outside the window get evicted (deliberately: an agent must never be permanently barred from saying the same thing again).
 20. **uuid makes a trace reproducible but not diffable.** Same content, different IDs, and you cannot use `diff` to find which message two runs diverged on. Changed to a process-local incrementing deterministic ID (starting at `m00000`), zeroed when a `Runtime` is constructed — and the zeroing point must precede **the first message this experiment produces**, which is why it lives in `__init__` rather than `run()` (the kickoff happens before `run()`).
+
+**Building on top of the thing you said you had not verified**
+
+21. **A skipped test is a test that stopped existing.** The cross-language interop suite needs node. The obvious implementation — `@skipUnless(node, ...)` — means that on any machine without node the file quietly turns into decoration while the suite still reports green. "We have cross-language tests" and "cross-language has not been verified in months" would look exactly the same from the outside. The fix is an env switch: `PEER_AGENTS_REQUIRE_NODE=1` turns "node is missing" from a skip into a **failure**, and CI sets it. The general lesson is worth more than the specific case: *a conditional test needs something that can fail, or the condition becomes the escape hatch.*
+22. **Fault isolation covered `think()` and nothing else.** `Runtime` wraps `agent.process()` in a try/except precisely so that one broken member cannot take down the team. But a brain has two other methods the framework calls — `has_pending_work` and `accepts_link` — and both sat **outside** that boundary. A brain raising in `has_pending_work` would throw straight through `run()` and kill the whole experiment; one raising in `accepts_link` would do the same, since `bus.send()` is called on a line the guard does not reach. The pattern here is subtle: the guard was written for the method that was obvious, and the two optional methods were added later, by a protocol (`AdaptiveBrain`) that *deliberately* does not require every brain to implement them. **A protection that covers "the" entry point usually covers only one of them.** All three call sites are now guarded, and `retry_pending()` — which also re-enters the delivery path — with them.
+23. **`TimeoutError` is an `OSError`, and one line of ordering decided whether a hiccup looked like a corpse.** When a peer times out, the connection is fine and the next round may succeed; when a peer's socket errors, the link is gone for good. Those need different responses, so the transport tracks a `broken` flag — set it wrong and a single slow round marks a healthy peer as dead. The bug: `TimeoutError` **subclasses `OSError`** in Python 3.10+, so `except OSError: self.broken = True` swallowed the timeout too. The fix is `except TimeoutError: raise` *before* `except OSError`, and there is now a test asserting that a timeout leaves `broken` false. **Subclass order in an `except` chain is load-bearing, and it reads like formatting.**
 
 ---
 
