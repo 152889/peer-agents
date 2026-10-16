@@ -9,7 +9,7 @@ description = "多 Agent 通信实验台：让子 Agent 之间直接对话，并
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "zhangguijie" }]
+authors = [{ name = "152889", email = "270261318+152889@users.noreply.github.com" }]
 keywords = ["multi-agent", "llm", "agent-communication", "topology", "message-bus"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -35,7 +35,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zhangguijie/peer-agents"
+Homepage = "https://github.com/152889/peer-agents"
+Repository = "https://github.com/152889/peer-agents"
+Protocol = "https://github.com/152889/peer-agents/blob/main/docs/PROTOCOL.md"
 
 [tool.setuptools]
 packages = ["peer_agents"]
@@ -89,6 +91,12 @@ ignore = [
 "tests/*" = ["BLE001"]
 # 桩服务要实现 http.server 的 do_POST 命名约定
 "tools/*" = ["N802"]
+# N818 要求异常名以 Error 结尾。线协议的异常描述的是「线上出了什么事」，
+# 不是「这是一个错误」—— 根类 WireError 已经带上了 Error 后缀，
+# `except WireError` 读起来是对的；再给每个子类缀一个 Error，
+# 只会得到 MalformedFrameError / FrameTooLargeError 这种口吃式命名，
+# 一个字的歧义都没消除。这条豁免的范围严格限定在这个模块内。
+"peer_agents/wire.py" = ["N818"]
 
 # ---------------------------------------------------------------------------
 [tool.mypy]

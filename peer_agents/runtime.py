@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .agent import Agent
@@ -174,8 +175,8 @@ class Runtime:
         reset_ids()
 
     # ------------------------------------------------------------------
-    def _on_fault(self, agent: Agent, batch: list[Message], exc: Exception,
-                  result: RunResult) -> None:
+    def _record_fault(self, agent: Agent, batch: list[Message], exc: Exception,
+                      result: RunResult) -> None:
         """一个成员崩了：记下来、把在途消息送进死信队列、然后继续跑。
 
         没有这一层，任何一个 Agent 的异常都会让整轮协作直接中断 ——
@@ -184,6 +185,9 @@ class Runtime:
         注意在途的那批消息进了**死信队列**而不是被丢掉：它们已经从信箱里
         取出来了，如果只是继续往下走，就等于凭空蒸发 —— 而「消息凭空消失」
         正是这个项目里最难查的一类 bug。
+
+        它被三处调用，因为一个成员能出错的地方有三处（见各自注释）：
+        ``think``、``has_pending_work``、以及它产出的消息进入总线的那一刻。
         """
         agent.faults += 1
         agent.last_error = f"{type(exc).__name__}: {exc}"
@@ -197,6 +201,37 @@ class Runtime:
         })
         if agent.faults >= self.max_faults_per_agent:
             agent.alive = False
+
+    def _brain_says_busy(self, agent: Agent, fn: Callable[[Blackboard], object] | None,
+                         result: RunResult) -> bool:
+        """问大脑「你手上还有没做完的事吗」。
+
+        这一步原本裸露在故障隔离之外，是 §9 第 22 条记下的那个缺口：
+        ``has_pending_work`` 一旦抛异常，异常会一路穿过整个 ``run()``，
+        把这个会话掀翻 —— 而它和 ``think`` 一样，都是大脑提供的、由框架
+        调用的方法。凭什么只保其中一个？
+
+        出错时返回 ``False`` 并记一次故障：把它当成「没有未了之事」继续跑，
+        总好过整轮崩掉；而这次故障会出现在 ``RunResult.faults`` 里，
+        所以它并没有被吞掉。
+        """
+        if fn is None:
+            return False
+        try:
+            return bool(fn(self.board))
+        except Exception as exc:              # noqa: BLE001 —— 隔离边界，必须兜住一切
+            self._record_fault(agent, [], exc, result)
+            return False
+
+    def _on_bus_fault(self, exc: Exception, result: RunResult) -> None:
+        """总线自己在重试阶段的异常 —— 没有具体的责任 Agent，但同样必须可见。"""
+        result.faults.append({
+            "agent": "*",
+            "error": f"{type(exc).__name__}: {exc}",
+            "round": self.board.round,
+            "lost_messages": 0,
+            "traceback": traceback.format_exc(limit=4),
+        })
 
     def _collect_unresolved(self) -> dict[str, list[str]]:
         """没结案时，挨个问大脑「你还缺什么」。
@@ -239,8 +274,13 @@ class Runtime:
         for rnd in range(1, self.max_rounds + 1):
             result.rounds = rnd
             self.board.round = rnd   # 让大脑能判断信息的「新鲜度」
-            # 先重试上一轮因不可达而挂起的消息（此时可能已协商出新的链路）
-            self.bus.retry_pending()
+            # 先重试上一轮因不可达而挂起的消息（此时可能已协商出新的链路）。
+            # 重试会走一遍完整的投递路径，也就会碰到大脑的建链表态 ——
+            # 所以它同样在故障隔离范围内。
+            try:
+                self.bus.retry_pending()
+            except Exception as exc:            # noqa: BLE001 —— 隔离边界，必须兜住一切
+                self._on_bus_fault(exc, result)
             active = 0
             for agent in self.agents:
                 if not agent.alive:
@@ -249,14 +289,14 @@ class Runtime:
                 #（比如「问了没人答」正在等超时重试）。少了后者，那些消息
                 # 会随着静默检测一起被埋掉。
                 pending = getattr(agent.brain, "has_pending_work", None)
-                if agent.inbox == 0 and not (pending and pending(self.board)):
+                if agent.inbox == 0 and not self._brain_says_busy(agent, pending, result):
                     continue
                 # 取信与处理分开：崩溃时调度器才知道该把哪一批消息送进死信队列
                 batch = agent.bus.take(agent.id)
                 try:
                     produced = agent.process(batch, self.board)
                 except Exception as exc:            # noqa: BLE001 —— 隔离边界，必须兜住一切
-                    self._on_fault(agent, batch, exc, result)
+                    self._record_fault(agent, batch, exc, result)
                     # 出错的成员仍在尝试，所以它依然算「活跃」——
                     # 否则一次瞬时故障会让系统误判收敛，提前收工。
                     active += 1
@@ -270,7 +310,13 @@ class Runtime:
                     if msg.kind == FINAL:
                         self.board.publish(msg.topic, msg.content, agent.id)
                         result.completed = True
-                    self.bus.send(msg)
+                    # 投递过程会回调大脑的建链表态（accepts_link），所以它也在
+                    # 故障隔离范围内。把这条消息当作「在途」记入死信队列 ——
+                    # 它确实已经产出了，不该在抛异常时凭空消失。
+                    try:
+                        self.bus.send(msg)
+                    except Exception as exc:        # noqa: BLE001 —— 隔离边界，必须兜住一切
+                        self._record_fault(agent, [msg], exc, result)
             # 收敛判定必须同时看「没人有信」和「没有消息还卡在路上」——
             # 后者若被忽略，正在等建链的消息会在静默瞬间被悄悄遗弃。
             if active == 0 and not self.bus.pending:
