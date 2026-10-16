@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peer-agents"
+version = "0.3.0"
+description = "多 Agent 通信实验台：让子 Agent 之间直接对话，并自主协商通信拓扑"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "zhangguijie" }]
+keywords = ["multi-agent", "llm", "agent-communication", "topology", "message-bus"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+# 零运行时依赖是刻意保持的：这是一个可以直接读、直接跑的实验台，
+# 而不是又一个需要装 30 个包的框架。
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/zhangguijie/peer-agents"
+
+[tool.setuptools]
+packages = ["peer_agents"]
+
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# 测试用标准库的 unittest 写，pytest 只当运行器 —— 这样不装任何依赖也能跑：
+#     python -m unittest discover -s tests
+python_files = ["test_*.py"]
+
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["out", ".venv", "__pycache__"]
+
+[tool.ruff.lint]
+# 显式列出要守的规则，而不是用默认值 —— 一份没写清楚规则的 lint 配置，
+# 换个版本就会冒出几十条「新问题」，然后所有人学会无视它。
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "PERF", # perflint
+    "RUF",  # ruff 自有规则
+    "BLE",  # flake8-blind-except：裸 except 必须显式豁免
+]
+ignore = [
+    "E501",   # 行长交给 formatter；中文注释按字符算会误伤
+    # 本项目是中文优先的代码库，注释与文案里全是全角标点（，：（）；）。
+    # 这三条规则会为每个全角逗号报一次「可能是同形字」—— 实测 930 条，
+    # 全部是噪音，会让真正的问题淹没在里面。刻意关掉。
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # `from . import message as M` 这类模块别名是常见写法，
+    # 用大写是为了和局部变量一眼区分开。
+    "N812",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里断言「坏输入不会崩」时，确实需要宽泛地兜异常
+"tests/*" = ["BLE001"]
+# 桩服务要实现 http.server 的 do_POST 命名约定
+"tools/*" = ["N802"]
+
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = ["peer_agents"]
+# 这个项目靠鸭子类型接大脑（RuleBrain / LLMBrain / DirtyBrain 互换），
+# 所以不能开 disallow_untyped_defs 那种「先声明后使用」的强约束。
+# 开启的是那些**真能抓出 bug** 的检查。
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true
+show_error_codes = true

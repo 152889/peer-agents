@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 测试 · ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          # Windows 跑一个版本：这个项目有 Windows 控制台编码相关的处理
+          # （sys.stdout.reconfigure(encoding="utf-8")），不能只测 Linux。
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 安装开发依赖
+        run: python -m pip install --upgrade pip ".[dev]"
+
+      - name: 全量测试
+        run: python -m pytest tests/ -v
+
+      # 三个 demo 是面向人的交付物，跑通 = 端到端没坏。
+      # 单测全绿但 demo 跑不起来，是很容易漏掉的一种失败。
+      - name: 端到端冒烟（三个 demo）
+        run: |
+          python run_demo.py
+          python run_dirty_demo.py
+          python run_llm_demo.py
+
+  zero-dep:
+    name: 零依赖可用性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # README 承诺「零运行时依赖，只装标准库就能跑」——
+      # 这一条必须被 CI 真的验证，而不是写在文档里当口号。
+      - name: 不装任何东西，直接用标准库跑测试
+        run: python -m unittest discover -s tests -v
+
+      - name: 不装任何东西，跑核心 demo
+        run: python run_demo.py
+
+  lint:
+    name: 静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装开发依赖
+        run: python -m pip install --upgrade pip ".[dev]"
+
+      - name: ruff（lint）
+        run: ruff check --output-format=github .
+
+      - name: mypy（类型）
+        run: mypy

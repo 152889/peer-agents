@@ -23,6 +23,8 @@ RuleBrain 的所有输入都是干净的一手事实,「问谁」是唯一要决
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 from .agent import Agent
 from .blackboard import Blackboard
 from .facts import Fact, best_of
@@ -30,6 +32,23 @@ from .message import ANSWER, FINAL, FINDING, QUERY, TASK, Message
 
 GULLIBLE = "gullible"
 SKEPTICAL = "skeptical"
+
+
+class BrainOptions(TypedDict, total=False):
+    """所有脏 Agent 共享的那部分构造配置。
+
+    刻意只收录「公共包」里真正会出现的键，而不是 `DirtyBrain.__init__` 的
+    全量参数表 —— 否则每个单独指定 `triggers=...` 的调用点都会撞上
+    「重复传参」的静态报错，而那个撞法本身是误报。
+
+    之所以非得要个 TypedDict：`DirtyBrain(**common)` 一旦收到
+    `dict[str, object]`，类型检查在这一行就彻底失效 —— 参数写错也看不出来。
+    实测裸 dict 会一次性让 mypy 吐出 33 条无法定位的错误。
+    """
+
+    disposition: str
+    ask_budget: int
+    fresh_within: int
 
 
 class DirtyBrain:
@@ -257,16 +276,18 @@ class DirtyBrain:
         运行时会提前收敛 —— 重试窗口还来不及打开，就被自己的静默检测埋掉了。
         「还欠着一件事」本身，就是「不该收敛」的理由。
         """
+        outstanding = False
         for (topic, owner), rounds in self.ask_log.items():
             if topic in self.ledger or (topic, owner) in self.exhausted:
                 continue
             if len(rounds) >= self.max_attempts:
                 continue
-            # 想问但预算已经用完 → 重试也无从谈起，不再拖住系统
-            if self.budget_used >= self.ask_budget:
-                return False
-            return True
-        return False
+            outstanding = True
+            break
+        if not outstanding:
+            return False
+        # 想问但预算已经用完 → 重试也无从谈起，不再拖住系统
+        return self.budget_used < self.ask_budget
 
     def stale_accepts(self, now: int) -> int:
         """被我采信、但已经过期的信息条数 —— 「被骗」的量化指标。"""
@@ -274,3 +295,38 @@ class DirtyBrain:
 
     def low_confidence_accepts(self) -> int:
         return sum(1 for f in self.ledger.values() if f.confidence < self.trust_threshold)
+
+    def blockers(self, agent: Agent, board: Blackboard) -> list[str]:
+        """没能结案时，说清楚到底缺什么、卡在哪一步。
+
+        这里刻意把三种「缺」分开 —— 它们的处置方式完全不同：
+          尚未询问     → 还能补救，去问；
+          问了始终不回 → 对方失能或不存在，要么重试要么换人；
+          明确表示不知道 → 换一个知情者，或者承认这条信息拿不到。
+        **一个只会说「失败」的失败，比失败本身更难排查。**
+        """
+        if not self.requirement:
+            return []
+        need, out_topic, _template = self.requirement
+        if out_topic in self.ledger:
+            return []
+
+        out: list[str] = []
+        for topic in sorted(need - set(self.ledger)):
+            owners = board.owners(topic)
+            if not owners:
+                out.append(f"「{topic}」无人知晓（通讯录里没有知情者）")
+                continue
+            detail = []
+            for owner in owners:
+                rounds = self.ask_log.get((topic, owner), [])
+                if not rounds:
+                    detail.append(f"{owner} 尚未询问")
+                elif (topic, owner) in self.exhausted:
+                    detail.append(f"{owner} 明确表示不掌握")
+                elif len(rounds) >= self.max_attempts:
+                    detail.append(f"{owner} 问了 {len(rounds)} 次始终无回应")
+                else:
+                    detail.append(f"{owner} 已问 {len(rounds)} 次，等待中")
+            out.append(f"「{topic}」← " + "；".join(detail))
+        return out

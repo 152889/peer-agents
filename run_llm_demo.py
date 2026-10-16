@@ -65,7 +65,7 @@ def main() -> None:
     print("=" * 78)
 
     try:
-        runtime, _board = build(topology="peer", brain_mode="llm")
+        runtime = build(topology="peer", brain_mode="llm")
         bootstrap(runtime)
         result = runtime.run(name="LLMBrain", ground_truth_tokens=GROUND_TRUTH_TOKENS)
     finally:
@@ -97,7 +97,7 @@ def main() -> None:
         print("┄" * 78)
 
     # --- 与规则大脑对照 -------------------------------------------------------
-    runtime2, _ = build(topology="peer", brain_mode="rule")
+    runtime2 = build(topology="peer", brain_mode="rule")
     bootstrap(runtime2)
     rule = runtime2.run(name="RuleBrain", ground_truth_tokens=GROUND_TRUTH_TOKENS)
 

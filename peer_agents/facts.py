@@ -34,7 +34,7 @@ class Fact:
         )
 
     @staticmethod
-    def decode(text: str) -> "Fact | None":
+    def decode(text: str) -> Fact | None:
         """解不出结构就返回 None —— 无法识别的信息一律当作「不可采信」。"""
         try:
             d = json.loads(text)
@@ -50,7 +50,7 @@ class Fact:
             return None
 
     # -- 时间 -------------------------------------------------------------
-    def stamp(self, now: int) -> "Fact":
+    def stamp(self, now: int) -> Fact:
         """把「实时」落地成绝对刻度。
 
         一条「当前情况」在被说出口之前是无所谓时间戳的 —— 只有它离开
@@ -70,10 +70,10 @@ class Fact:
         """可信 = 置信度够高 **且** 不算过期。两个条件缺一不可。"""
         return self.confidence >= threshold and not self.is_stale(now, fresh_within)
 
-    def contradicts(self, other: "Fact") -> bool:
+    def contradicts(self, other: Fact) -> bool:
         return self.value.strip() != other.value.strip()
 
-    def with_source(self, source: str) -> "Fact":
+    def with_source(self, source: str) -> Fact:
         return replace(self, source=source)
 
     def brief(self) -> str:

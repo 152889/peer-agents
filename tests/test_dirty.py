@@ -18,12 +18,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from peer_agents import message as M  # noqa: E402
-from peer_agents import scenario_dirty as S  # noqa: E402
-from peer_agents.brain_dirty import GULLIBLE, SKEPTICAL, DirtyBrain  # noqa: E402
-from peer_agents.bus import MessageBus, star_policy  # noqa: E402
-from peer_agents.facts import Fact, best_of  # noqa: E402
-from peer_agents.blackboard import Blackboard  # noqa: E402
+from peer_agents import message as M
+from peer_agents import scenario_dirty as S
+from peer_agents.blackboard import Blackboard
+from peer_agents.brain_dirty import GULLIBLE, SKEPTICAL, DirtyBrain
+from peer_agents.bus import MessageBus
+from peer_agents.facts import Fact, best_of
 
 HUB = "sre"
 
@@ -247,7 +247,7 @@ class TestDirtyScenario(unittest.TestCase):
                          "轻信策略下，排在后面的知情者从头到尾没被问过")
 
     def test_unresponsive_member_is_retried_until_it_answers(self):
-        rt, r = run(SKEPTICAL, "peer")
+        rt, _r = run(SKEPTICAL, "peer")
         sre = brain_of(rt, "sre")
         self.assertIn("query_change", sre.ledger, "重试最终应拿到订单服务的答复")
         self.assertGreaterEqual(len(sre.ask_log[("query_change", "ordersvc")]), 2,

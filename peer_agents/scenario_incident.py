@@ -21,10 +21,11 @@
 
 from __future__ import annotations
 
-from .agent import Agent, RuleBrain
+from .agent import Agent, Brain, RuleBrain
 from .blackboard import Blackboard
 from .bus import MessageBus, full_mesh_policy, star_policy
 from .llm import LLMBrain
+from .message import Message
 from .runtime import Runtime
 from .topology import Topology
 
@@ -70,7 +71,7 @@ def build(
     publish_all_findings: bool = False,
     link_budget: int = LINK_BUDGET,
     brain_mode: str = "rule",
-) -> tuple[Runtime, Blackboard]:
+) -> Runtime:
     """组装一个可运行的故障定位系统。
 
     topology:
@@ -100,9 +101,11 @@ def build(
             initial_links=[("sre", "gateway"), ("gateway", "deploy"), ("deploy", "ordersvc")],
         )
 
-        def accept(owner_id: str, requester_id: str, msg) -> bool:  # type: ignore[no-untyped-def]
+        def accept(owner_id: str, requester_id: str, msg: Message) -> bool:
+            # 大脑的建链表态是**可选**能力，用 getattr 探测而不是硬性要求
             br = brain_map.get(owner_id)
-            return bool(br and br.accepts_link(requester_id, msg))
+            fn = getattr(br, "accepts_link", None)
+            return bool(fn and fn(requester_id, msg))
 
         bus = MessageBus(topology=topo, accept_hook=accept)
     else:
@@ -115,20 +118,24 @@ def build(
     bus.register(*[a.id for a in agents])
 
     if publish_all_findings:
-        for aid, br in brain_map.items():
-            _enable_blackboard_publishing(aid, br, board)
+        # 只在规则大脑上生效：LLM 大脑的可见性由它自己的 prompt 决定。
+        for br in brain_map.values():
+            if isinstance(br, RuleBrain):
+                br.publish_to_board = board
 
-    return Runtime(agents, bus, board, hub=active_hub), board
+    # 与 scenario_dirty.build 保持同一签名：只返回 Runtime。
+    # 黑板可以从 runtime.board 拿到 —— 两个场景的入口不该长得不一样。
+    return Runtime(agents, bus, board, hub=active_hub)
 
 
 def _build_brains(
     active_hub: str | None,
     hub_summarize_chars: int | None,
     brain_mode: str = "rule",
-) -> dict[str, object]:
+) -> dict[str, Brain]:
     if brain_mode == "llm":
         return _build_llm_brains()
-    return {
+    brains: dict[str, Brain] = {
         "sre": RuleBrain(
             owns=(T_REPORT,),
             hypothesis=(
@@ -174,6 +181,7 @@ def _build_brains(
             },
         ),
     }
+    return brains
 
 
 _LLM_ROLES = {
@@ -199,7 +207,7 @@ _LLM_SKILLS: dict[str, dict[str, str]] = {
 }
 
 
-def _build_llm_brains() -> dict[str, object]:
+def _build_llm_brains() -> dict[str, Brain]:
     """用真实大模型替换规则大脑。
 
     注意：``persona`` 里保留了「你是「<agent_id>」」这个可解析的标记，
@@ -215,19 +223,3 @@ def _build_llm_brains() -> dict[str, object]:
 def kickoff(board: Blackboard) -> None:
     """由 SRE 发起一次故障定位任务（交给网关，因为症状最先在网关露出）。"""
     board.artifacts.setdefault("trigger", "checkout P99 劣化告警")
-
-
-def _enable_blackboard_publishing(agent_id: str, brain: RuleBrain, board: Blackboard) -> None:
-    """可选增强：Agent 把答出的结论同步贴上共享黑板。
-
-    这样其他人不必再问一遍，实现「一次查清、全局复用」的间接协作。
-    """
-    original = brain._maybe_answer  # noqa: SLF001 - 演示用，故意直接改写
-
-    def wrapper(agent: Agent, m):  # type: ignore[no-untyped-def]
-        reply = original(agent, m)
-        if reply is not None:
-            board.publish(reply.topic, reply.content, agent.id)
-        return reply
-
-    brain._maybe_answer = wrapper  # type: ignore[method-assign]  # noqa: SLF001

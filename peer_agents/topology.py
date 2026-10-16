@@ -108,7 +108,7 @@ class Topology:
             while len(self.links[n]) >= self.budget and self.links[n]:
                 victim = min(
                     self.links[n],
-                    key=lambda x, n=n: self.last_used.get(edge_key(n, x), 0),
+                    key=lambda peer: self.last_used.get(edge_key(n, peer), 0),
                 )
                 self.unlink(n, victim)
                 self.evictions += 1

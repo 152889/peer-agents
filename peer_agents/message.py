@@ -14,9 +14,26 @@
 
 from __future__ import annotations
 
+import itertools
 import time
-import uuid
 from dataclasses import dataclass, field, replace
+
+# 消息编号：**确定性递增**，而不是 uuid4。
+#
+# 为了让两次同配置的运行能逐字节 diff —— 这是「可复现」这个词的实际含义。
+# 单线程确定性调度下，构造顺序固定，于是编号也固定；`Runtime.run()` 开头会
+# 调 `reset_ids()`，保证同一进程内跑第二遍也是同一个序列。
+_id_seq = itertools.count()
+
+
+def reset_ids() -> None:
+    """把编号序列拨回零。由 `Runtime.run()` 在每次实验开始时调用。"""
+    global _id_seq
+    _id_seq = itertools.count()
+
+
+def _next_id() -> str:
+    return f"m{next(_id_seq):05d}"
 
 # 语义化消息类型。用 kind 而不是裸文本，方便总线做路由与审计。
 TASK = "TASK"        # 上级/协作者派活
@@ -47,7 +64,7 @@ class Message:
     kind: str
     topic: str
     content: str
-    msg_id: str = field(default_factory=lambda: uuid.uuid4().hex[:6])
+    msg_id: str = field(default_factory=_next_id)
     reply_to: str | None = None
     hop: int = 0
     attempt: int = 0             # 第几次尝试（0 = 首次）。重试是「新的一次发送」
@@ -55,13 +72,13 @@ class Message:
     relayed_by: str | None = None
     path: tuple[str, ...] = ()   # 本次投递实际穿过的节点序列（多跳路由留痕）
     origin_kind: str = ""        # 控制面报文用来携带「它在替哪种业务消息谈链路」
-    ts: float = field(default_factory=time.time)
+    ts: float = field(default_factory=time.time)   # 墙上时钟，仅供观测，不参与任何判定
 
     # -- 便捷构造 ---------------------------------------------------------
-    def clone(self, **kw) -> "Message":
+    def clone(self, **kw) -> Message:
         return replace(self, **kw)
 
-    def to(self, *recipients: str) -> "Message":
+    def to(self, *recipients: str) -> Message:
         return replace(self, recipients=tuple(recipients))
 
     # -- 展示 -------------------------------------------------------------

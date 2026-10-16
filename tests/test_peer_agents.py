@@ -13,14 +13,14 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from peer_agents import message as M  # noqa: E402
-from peer_agents.bus import MessageBus, star_policy  # noqa: E402
-from peer_agents.scenario_incident import (  # noqa: E402
+from peer_agents import message as M
+from peer_agents.bus import MessageBus, star_policy
+from peer_agents.scenario_incident import (
     GROUND_TRUTH_TOKENS,
     T_SCOPE,
     build,
 )
-from peer_agents.topology import Topology  # noqa: E402
+from peer_agents.topology import Topology
 
 HUB = "sre"
 
@@ -38,7 +38,7 @@ def bootstrap(runtime) -> None:
 
 
 def run_scenario(**cfg):
-    runtime, _board = build(**cfg)
+    runtime = build(**cfg)
     bootstrap(runtime)
     return runtime.run(name=cfg.get("topology", "?"), ground_truth_tokens=GROUND_TRUTH_TOKENS)
 
@@ -134,7 +134,7 @@ class TestBus(unittest.TestCase):
 
 class TestScenarios(unittest.TestCase):
     def test_every_topology_reaches_the_same_root_cause(self):
-        for cfg in (dict(topology="peer"), dict(topology="star"), dict(topology="adaptive")):
+        for cfg in ({"topology": "peer"}, {"topology": "star"}, {"topology": "adaptive"}):
             with self.subTest(topology=cfg["topology"]):
                 r = run_scenario(**cfg)
                 self.assertIn("SeqScan", r.final_report)
@@ -227,7 +227,7 @@ class TestLLMBrain(unittest.TestCase):
         self.assertEqual(llm.final_report, rule.final_report, "协议层不应改变结论文本")
 
     def test_prompt_contains_every_required_section(self):
-        runtime, _ = build(topology="peer", brain_mode="llm")
+        runtime = build(topology="peer", brain_mode="llm")
         bootstrap(runtime)
         runtime.run(name="llm", ground_truth_tokens=GROUND_TRUTH_TOKENS)
         prompts = [req["prompt"] for a in runtime.agents
@@ -239,7 +239,7 @@ class TestLLMBrain(unittest.TestCase):
         self.assertIn("slow_query → 知情者 dba", joined, "prompt 里应带上通讯录")
 
     def test_request_is_well_formed(self):
-        runtime, _ = build(topology="peer", brain_mode="llm")
+        runtime = build(topology="peer", brain_mode="llm")
         bootstrap(runtime)
         runtime.run(name="llm", ground_truth_tokens=GROUND_TRUTH_TOKENS)
         req = next(req for a in runtime.agents for req in getattr(a.brain, "requests", []))

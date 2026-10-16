@@ -14,19 +14,51 @@ RuleBrain 是一个极简的「触发式」推理机，三条规则：
 
 from __future__ import annotations
 
+from typing import Protocol
+
 from .blackboard import Blackboard
 from .bus import MessageBus
 from .message import ANSWER, FINAL, FINDING, INFORM, QUERY, TASK, Message
 
 
+class Brain(Protocol):
+    """大脑必须实现的最小接口。
+
+    「身份 + 信箱」由框架提供，「怎么想」由这里插进来 —— 这条缝就是整个项目
+    可插拔性的落点。用 Protocol 而不是抽象基类，是为了不强迫任何实现去继承
+    什么：`RuleBrain`、`DirtyBrain`、`LLMBrain` 和测试里的桩，结构对了就能用。
+    """
+
+    def think(self, agent: Agent, batch: list[Message], board: Blackboard) -> list[Message]: ...
+
+
+class AdaptiveBrain(Protocol):
+    """额外参与「拓扑协商」与「超时重试」的大脑。
+
+    这两个能力是可选的，所以单独立一个协议 —— 框架用 `getattr(..., None)`
+    探测它们是否存在，而不是硬性要求每个大脑都实现。
+    """
+
+    def think(self, agent: Agent, batch: list[Message], board: Blackboard) -> list[Message]: ...
+
+    def accepts_link(self, requester: str, msg: Message) -> bool: ...
+
+    def has_pending_work(self, board: Blackboard) -> bool: ...
+
+
 class Agent:
-    def __init__(self, agent_id: str, role: str, brain: "RuleBrain | object", bus: MessageBus) -> None:
+    def __init__(self, agent_id: str, role: str, brain: Brain, bus: MessageBus) -> None:
         self.id = agent_id
         self.role = role
-        self.brain = brain
+        self.brain: Brain = brain
         self.bus = bus
         self.notes: dict[str, str] = {}  # 我已知的 topic -> 内容
         self.done: bool = False
+        # 故障状态：由调度器维护。一个成员反复出错时会被摘除，
+        # 而不是让整支队伍陪着它一起崩。
+        self.faults: int = 0
+        self.alive: bool = True
+        self.last_error: str = ""
         bus.register(agent_id)
 
     @property
@@ -34,7 +66,7 @@ class Agent:
         return self.bus.mail_count(self.id)
 
     def step(self, board: Blackboard) -> list[Message]:
-        """轮转一次。
+        """取信并处理。单线程/库内直接使用时的便捷入口。
 
         即便信箱是空的，也要把「空批次」交给大脑 —— 因为大脑手上可能有
         与收信无关的未了之事，最典型的就是「问了没人答，过一会儿要重试」。
@@ -42,7 +74,15 @@ class Agent:
         调度器只在「有信」或「大脑自认还有事」时才轮到这里（见 Runtime），
         所以这次调用不会让空闲 Agent 空转。
         """
-        batch = self.bus.take(self.id)
+        return self.process(self.bus.take(self.id), board)
+
+    def process(self, batch: list[Message], board: Blackboard) -> list[Message]:
+        """处理一批已取出的消息。
+
+        与 ``step`` 分开，是为了让调度器自己掌控「取信」这一步 ——
+        大脑崩掉时，它必须知道**是哪一批消息在手上没处理完**，
+        才能把它们送进死信队列，而不是让它们凭空消失。
+        """
         return self.brain.think(self, batch, board)
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -58,6 +98,7 @@ class RuleBrain:
         hypothesis: tuple[set[str], str, str] | None = None,
         report_to: str | None = None,
         summarize_chars: int | None = None,
+        publish_to_board: Blackboard | None = None,
     ) -> None:
         self.owns = set(owns)
         self.facts = dict(facts or {})
@@ -66,6 +107,10 @@ class RuleBrain:
         self.report_to = report_to
         # 仅枢纽会用到：代投时把长消息截断，模拟「主 Agent 转述时丢细节」
         self.summarize_chars = summarize_chars
+        # 可选增强：把答出的结论同步贴上共享黑板，别人就不必再问一遍。
+        # 这是构造参数，而不是事后猴补丁替换 _maybe_answer ——
+        # 替换私有方法的写法，任何一次重构都会把它默默弄坏。
+        self.publish_to_board = publish_to_board
         # 是否愿意跟「非本领域」的 Agent 建立直连（默认只接本领域的活儿）
         self.open_link = False
         self._asked: set[str] = set()
@@ -112,6 +157,9 @@ class RuleBrain:
             reply = self._maybe_answer(agent, m)
             if reply:
                 out.append(reply)
+                # 可选增强：答出来的东西顺手贴上黑板，别人不必再问一遍
+                if self.publish_to_board is not None:
+                    self.publish_to_board.publish(reply.topic, reply.content, agent.id)
 
             # 记录我新学到的事实（来自别人的 ANSWER / FINDING）
             if m.kind in (ANSWER, FINDING) and m.topic not in agent.notes:
@@ -177,6 +225,23 @@ class RuleBrain:
             content=content,
             reply_to=m.msg_id,
         )
+
+    # ------------------------------------------------------------------
+    def blockers(self, agent: Agent, board: Blackboard) -> list[str]:
+        """还没凑齐的前提 —— 没能结案时，「缺什么」必须说得出来。
+
+        少了这个方法，实验跑完只会得到一个空报告：谁也不知道是卡在
+        「没人知道」，还是「那个人没回我」。**失败必须在结果里可见。**
+        """
+        if not self.hypothesis:
+            return []
+        need, out_topic, _template = self.hypothesis
+        if out_topic in agent.notes:
+            return []
+        return [
+            f"缺「{t}」（知情者 {'/'.join(board.owners(t)) or '未知'}）"
+            for t in sorted(need - set(agent.notes))
+        ]
 
 
 class EchoBrain:

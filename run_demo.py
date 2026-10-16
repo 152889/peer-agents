@@ -29,11 +29,11 @@ from peer_agents.scenario_incident import (  # noqa: E402
 
 HUB = "sre"
 CONFIGS = [
-    ("对等协作（全连通）", dict(topology="peer", hub_summarize_chars=None)),
-    ("星型转述（中心化）", dict(topology="star", hub_summarize_chars=None)),
-    ("星型转述 + 主 Agent 摘要", dict(topology="star", hub_summarize_chars=38)),
-    ("自适应拓扑（预算3）", dict(topology="adaptive", link_budget=3)),
-    ("自适应拓扑（预算2）", dict(topology="adaptive", link_budget=2)),
+    ("对等协作（全连通）", {"topology": "peer", "hub_summarize_chars": None}),
+    ("星型转述（中心化）", {"topology": "star", "hub_summarize_chars": None}),
+    ("星型转述 + 主 Agent 摘要", {"topology": "star", "hub_summarize_chars": 38}),
+    ("自适应拓扑（预算3）", {"topology": "adaptive", "link_budget": 3}),
+    ("自适应拓扑（预算2）", {"topology": "adaptive", "link_budget": 2}),
 ]
 
 
@@ -57,7 +57,7 @@ def main() -> None:
     print("=" * 78)
 
     for name, cfg in CONFIGS:
-        runtime, board = build(**cfg)
+        runtime = build(**cfg)
         bootstrap(runtime)
         r = runtime.run(name=name, ground_truth_tokens=GROUND_TRUTH_TOKENS)
         results.append(r)

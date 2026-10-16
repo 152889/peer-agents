@@ -35,9 +35,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from peer_agents import message as M  # noqa: E402
-from peer_agents.blackboard import Blackboard  # noqa: E402
-from peer_agents.scenario_incident import DIRECTORY, _build_brains  # noqa: E402
+from peer_agents import message as M
+from peer_agents.blackboard import Blackboard
+from peer_agents.scenario_incident import DIRECTORY, _build_brains
 
 ID_RE = re.compile(r"你是「(\w+)」")
 INBOX_RE = re.compile(r"^\[(\w+):([\w_]+)\]\s+(\S+)\s+→ 你:\s*(.*)$", re.M)
@@ -109,7 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args) -> None:  # 静音，避免污染演示输出
         pass
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length).decode("utf-8")
         try:

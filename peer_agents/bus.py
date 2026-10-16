@@ -25,7 +25,8 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections import OrderedDict
+from collections.abc import Callable
 
 from .message import CONTROL_KINDS, LINK_ACCEPT, LINK_REJECT, LINK_REQUEST, Message
 from .topology import Key, Topology, edge_key
@@ -41,6 +42,7 @@ class MessageBus:
         max_hop: int = 40,
         dedup: bool = True,
         max_link_attempts: int = 4,
+        dedup_window: int = 4096,
     ) -> None:
         self.boxes: dict[str, list[Message]] = {}
         self.audit: list[Message] = []
@@ -52,8 +54,13 @@ class MessageBus:
         self.max_hop = max_hop
         self.dedup = dedup
         self.max_link_attempts = max_link_attempts
+        # 去重窗口：只保留最近 N 条签名。
+        # 去重要拦的是「绕圈」—— 绕圈总是在很短的窗口内发生，所以滑动窗口
+        # 完全够用；而无限累积下去，长跑时这张表会一直涨（实测 5000 条消息
+        # 就常驻 5000 条记录）。这是用「有限记忆」换「不泄漏」。
+        self.dedup_window = dedup_window
 
-        self._seen: set[tuple] = set()
+        self._seen: OrderedDict[tuple, None] = OrderedDict()
         self._link_pending: set[Key] = set()
 
         # 观测数据
@@ -116,8 +123,15 @@ class MessageBus:
             pended = pended or parked
 
         if self.dedup and delivered and not pended:
-            self._seen.add(msg.signature())
+            self._remember(msg.signature())
         return delivered
+
+    def _remember(self, sig: tuple) -> None:
+        """记住一条已投递的签名，并把窗口外的旧签名挤出去。"""
+        self._seen[sig] = None
+        self._seen.move_to_end(sig)
+        while len(self._seen) > self.dedup_window:
+            self._seen.popitem(last=False)
 
     def _resolve(self, msg: Message) -> list[str]:
         out: list[str] = []
@@ -242,8 +256,8 @@ class MessageBus:
 
     # -- 统计 -------------------------------------------------------------
     def stats(self) -> dict:
-        sent: dict[str, int] = {a: 0 for a in self.boxes}
-        recv: dict[str, int] = {a: 0 for a in self.boxes}
+        sent: dict[str, int] = dict.fromkeys(self.boxes, 0)
+        recv: dict[str, int] = dict.fromkeys(self.boxes, 0)
         for m in self.audit:
             sent[m.sender] = sent.get(m.sender, 0) + 1
             for r in self._resolve(m):

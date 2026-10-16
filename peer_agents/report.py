@@ -39,12 +39,12 @@ def summary_table(results: list[RunResult], hub: str) -> str:
         f"{'枢纽负载':>9}{'中转':>6}{'多跳':>6}{'保真度':>8}"
     )
     rows = [head, "-" * len(head.encode("gbk", errors="ignore"))]
-    for r in results:
-        rows.append(
-            f"{r.name:<26}{r.data_messages:>9}{r.control_messages:>9}{r.rounds:>6}"
-            f"{r.lateral(hub):>6}{r.hub_load(hub):>9}{r.relay_touches:>6}"
-            f"{r.transit_hops:>6}{r.fidelity * 100:>7.0f}%"
-        )
+    rows.extend(
+        f"{r.name:<26}{r.data_messages:>9}{r.control_messages:>9}{r.rounds:>6}"
+        f"{r.lateral(hub):>6}{r.hub_load(hub):>9}{r.relay_touches:>6}"
+        f"{r.transit_hops:>6}{r.fidelity * 100:>7.0f}%"
+        for r in results
+    )
     return "\n".join(rows)
 
 
@@ -52,9 +52,9 @@ def write_html(results: list[RunResult], hub: str, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     cards = []
     for r in results:
-        color, bg = MODE_TAG.get(r.name, ("#444441", "#F1EFE8"))
+        color, _bg = MODE_TAG.get(r.name, ("#444441", "#F1EFE8"))
         steps = []
-        for i, m in enumerate(r.messages, 1):
+        for m in r.messages:
             if m.relay_to:
                 badge, cls = "代投", "k relay"
             elif len(m.path) > 2:

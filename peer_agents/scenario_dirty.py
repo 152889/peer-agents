@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from .agent import Agent
 from .blackboard import Blackboard
-from .brain_dirty import GULLIBLE, SKEPTICAL, DirtyBrain
+from .brain_dirty import SKEPTICAL, BrainOptions, DirtyBrain
 from .bus import MessageBus, full_mesh_policy, star_policy
 from .facts import Fact
 from .runtime import Runtime
@@ -165,11 +165,11 @@ def build(
     topology:    "peer" 对等全连通 / "star" 一切经 sre 转述
     """
     knowledge = _knowledge()
-    common = dict(
-        disposition=disposition,
-        ask_budget=ask_budget,
-        fresh_within=FRESH_WITHIN,
-    )
+    common: BrainOptions = {
+        "disposition": disposition,
+        "ask_budget": ask_budget,
+        "fresh_within": FRESH_WITHIN,
+    }
 
     brains: dict[str, DirtyBrain] = {
         "sre": DirtyBrain(
