@@ -261,6 +261,34 @@ class TestLLMBrain(unittest.TestCase):
             if saved:
                 os.environ["OPENAI_API_KEY"] = saved
 
+    def test_string_recipient_is_not_exploded_into_characters(self):
+        """`"to": "audit"` 若被 tuple() 直接吃掉，会拆成 a/u/d/i/t 五个幽灵收件人,
+        真正的 audit 一条都收不到 —— 没有异常、没有日志,只表现为「对方没回我」。"""
+        from peer_agents.llm import LLMBrain
+
+        parsed = LLMBrain._parse('[{"to":"audit","kind":"QUERY","topic":"t","content":"c"}]')
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["to"], ["audit"], "字符串收件人应被规整成单元素列表")
+
+    def test_control_plane_kind_from_model_is_discarded(self):
+        """模型不得伪造建链请求 —— 否则「不能越权改动框架」就是空话。"""
+        from peer_agents.llm import LLMBrain
+
+        for kind in ("LINK_REQUEST", "LINK_ACCEPT", "LINK_REJECT", "LINK_REVOKE"):
+            with self.subTest(kind=kind):
+                out = LLMBrain._parse(
+                    f'[{{"to":["dba"],"kind":"{kind}","topic":"t","content":"c"}}]'
+                )
+                self.assertEqual(out, [], f"{kind} 属于控制面，必须丢弃")
+
+    def test_unknown_kind_is_discarded(self):
+        from peer_agents.llm import LLMBrain
+
+        self.assertEqual(LLMBrain._parse('[{"to":["a"],"kind":"EVIL","topic":"t","content":"c"}]'), [])
+        # 缺 kind 时退化为 INFORM，而不是丢弃 —— 这是常见的良性省略
+        ok = LLMBrain._parse('[{"to":["a"],"topic":"t","content":"c"}]')
+        self.assertEqual(ok[0]["kind"], "INFORM")
+
     def test_malformed_response_does_not_crash(self):
         """模型不听话、返回一堆废话时，应退化为「本轮不发消息」而不是崩掉。"""
         from peer_agents.llm import LLMBrain
@@ -271,6 +299,10 @@ class TestLLMBrain(unittest.TestCase):
         self.assertEqual(brain._parse("抱歉，我无法回答。"), [])
         self.assertEqual(brain._parse(""), [])
         self.assertEqual(brain._parse('{"not": "a list"}'), [])
+        self.assertEqual(brain._parse('["a","b"]'), [], "数组元素不是对象应丢弃")
+        self.assertEqual(brain._parse("[1,2,3]"), [])
+        self.assertEqual(brain._parse('[{"to":[],"kind":"QUERY","topic":"t","content":"c"}]'), [],
+                         "空收件人应丢弃")
 
         fenced = '```json\n[{"to":["a"],"kind":"QUERY","topic":"t","content":"c"}]\n```'
         parsed = brain._parse(fenced)
@@ -282,6 +314,28 @@ class TestLLMBrain(unittest.TestCase):
 
         # 缺少 to 字段的指令应被丢弃，避免总线收到无法投递的消息
         self.assertEqual(brain._parse('[{"kind":"QUERY","topic":"t","content":"c"}]'), [])
+
+    def test_bus_refuses_control_plane_message_from_agent(self):
+        """权限边界必须在总线上也守一道 —— 不能只靠大脑自觉。"""
+        bus = MessageBus()
+        bus.register("a", "b")
+        for kind in ("LINK_REQUEST", "LINK_ACCEPT", "LINK_REJECT", "LINK_REVOKE"):
+            with self.subTest(kind=kind):
+                n = bus.send(M.Message(sender="a", recipients=("b",), kind=kind,
+                                       topic="t", content="伪造的控制面报文"))
+                self.assertEqual(n, 0, "Agent 不应能发送控制面报文")
+        self.assertEqual(len(bus.boxes["b"]), 0)
+        self.assertIn("control-plane-not-from-agent", {why for _m, _d, why in bus.dropped})
+
+    def test_link_request_without_topology_does_not_crash(self):
+        """原本这里是一句 assert —— 在 `python -O` 下会被剥掉，
+        把一条本该优雅退场的分支变成生产环境才炸的地雷。"""
+        bus = MessageBus()
+        bus.register("a", "b")
+        bus._deliver_control(
+            M.Message(sender="a", recipients=("b",), kind=M.LINK_REQUEST, topic="t", content="x"), "b"
+        )
+        self.assertEqual(bus.link_requests, 0)
 
 
 if __name__ == "__main__":

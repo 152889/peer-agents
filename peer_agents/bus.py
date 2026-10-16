@@ -85,6 +85,15 @@ class MessageBus:
 
     # -- 投递 -------------------------------------------------------------
     def send(self, msg: Message, attempts: int = 0) -> int:
+        # 权限边界：控制面报文只能由总线自己生成。外部的 send() 一律拒收。
+        #
+        # 少了这道闸，任何大脑（尤其是 LLM 大脑）只要吐出
+        # {"kind": "LINK_REQUEST"} 就能伪造建链请求、直接改写拓扑 ——
+        # 所谓「模型只能决定跟谁说什么，不能改动框架」就成了空话。
+        if msg.kind in CONTROL_KINDS:
+            self.dropped.append((msg, "*", "control-plane-not-from-agent"))
+            return 0
+
         if self.dedup:
             sig = msg.signature()
             if sig in self._seen:
@@ -187,7 +196,10 @@ class MessageBus:
         if m.kind != LINK_REQUEST:
             return
 
-        assert self.topology is not None
+        # 用提前返回而不是 assert：assert 在 `python -O` 下会被整个剥掉，
+        # 把一条本该优雅退场的分支变成「生产环境才炸」的隐藏地雷。
+        if self.topology is None:
+            return
         self.link_requests += 1
         accepted = bool(self.accept_hook and self.accept_hook(dst, m.sender, m))
         linked = accepted and self.topology.try_link(m.sender, dst)

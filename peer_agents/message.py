@@ -34,6 +34,11 @@ LINK_REVOKE = "LINK_REVOKE"
 
 CONTROL_KINDS = frozenset({LINK_REQUEST, LINK_ACCEPT, LINK_REJECT, LINK_REVOKE})
 
+# 数据面消息：**Agent 的大脑**可以自由选择的那几种。
+# 这张白名单是权限边界 —— 控制面报文只能由总线自己生成，
+# 一旦让大脑（尤其是 LLM 大脑）也能发，拓扑就成了模型可以随手改的东西。
+DATA_KINDS = frozenset({TASK, QUERY, ANSWER, FINDING, FINAL, INFORM})
+
 
 @dataclass(frozen=True)
 class Message:

@@ -12,7 +12,10 @@
 
 约束：LLM 必须返回严格的 JSON 数组，每项形如
     {"to": ["dba"], "kind": "QUERY", "topic": "slow_query", "content": "..."}
-这样模型就只是在「决定跟谁说什么」，而不能越权改动框架。
+
+模型输出在 `_sanitize` 处被收敛：`to` 会被规整成字符串列表，`kind` 必须落在
+**数据面白名单**（`DATA_KINDS`）内，否则整条指令丢弃。这是一条权限边界 ——
+模型只能决定「跟谁说什么」，「谁能连谁」由总线独占，控制面报文从不经过大脑。
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import urllib.request
 
 from .agent import Agent
 from .blackboard import Blackboard
-from .message import ANSWER, FINAL, Message
+from .message import ANSWER, DATA_KINDS, FINAL, INFORM, Message
 
 SYSTEM_TEMPLATE = """你是多 Agent 协作团队中的一名成员。
 
@@ -90,17 +93,19 @@ class LLMBrain:
                 pending.append(m)
 
         prompt = self._render(agent, pending, board)
-        for item in self._call(prompt):
-            recipients = tuple(item.get("to") or ())
-            if not recipients:
+        for raw in self._call(prompt):
+            # 再收敛一次：`_call` 是可以被子类或测试覆写的，
+            # 不能假设它的返回值一定来自 `_parse`。
+            item = self._sanitize(raw)
+            if item is None:
                 continue
             out.append(
                 Message(
                     sender=agent.id,
-                    recipients=recipients,
-                    kind=item.get("kind", "INFORM"),
-                    topic=item.get("topic", "misc"),
-                    content=item.get("content", ""),
+                    recipients=tuple(item["to"]),
+                    kind=item["kind"],
+                    topic=item["topic"],
+                    content=item["content"],
                 )
             )
         return out
@@ -164,4 +169,40 @@ class LLMBrain:
                 return []
         if not isinstance(data, list):
             return []
-        return [item for item in data if isinstance(item, dict) and item.get("to")]
+        return [clean for item in data if (clean := LLMBrain._sanitize(item)) is not None]
+
+    @staticmethod
+    def _sanitize(item) -> dict | None:
+        """把模型的一条指令收敛成安全的形式；收敛不了就丢弃。
+
+        这里是模型输出进入框架的**唯一入口**，边界必须守在这儿。
+        它挡的是三类真实事故：
+
+        * ``to`` 写成字符串 —— 会被 `tuple()` 拆成字符序列，消息发给
+          a/u/d/i/t 这些根本不存在的收件人，真正该收的那位一条都收不到。
+          **没有异常、没有日志，只表现为「对方没回我」**，最难排查。
+        * ``kind`` 填成控制面类型 —— 模型就能伪造建链请求，越过框架直接
+          改写拓扑。
+        * ``kind`` 压根不认识 —— 下游不认识它，行为未定义。
+
+        后两种一律丢弃而不是降级：宁可让这个成员这一轮失语。
+        """
+        if not isinstance(item, dict):
+            return None
+        to = item.get("to")
+        if isinstance(to, str):
+            to = [to]          # 宽松接受最常见的格式错误
+        if not isinstance(to, list):
+            return None
+        recipients = [r for r in to if isinstance(r, str) and r.strip()]
+        if not recipients:
+            return None
+        kind = item.get("kind") or INFORM
+        if kind not in DATA_KINDS:
+            return None
+        return {
+            "to": recipients,
+            "kind": kind,
+            "topic": str(item.get("topic") or "misc"),
+            "content": str(item.get("content") or ""),
+        }
