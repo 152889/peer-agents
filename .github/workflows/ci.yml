@@ -20,6 +20,10 @@ jobs:
           # （sys.stdout.reconfigure(encoding="utf-8")），不能只测 Linux。
           - os: windows-latest
             python: "3.13"
+    env:
+      # 跨语言互操作不允许静默跳过：runner 上一定有 node，
+      # 缺了就是环境出问题，应当失败而不是「反正也全绿」。
+      PEER_AGENTS_REQUIRE_NODE: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -27,23 +31,29 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: 显示 node 版本（跨语言互操作要用）
+        run: node --version
+
       - name: 安装开发依赖
         run: python -m pip install --upgrade pip ".[dev]"
 
       - name: 全量测试
         run: python -m pytest tests/ -v
 
-      # 三个 demo 是面向人的交付物，跑通 = 端到端没坏。
+      # 四个 demo 是面向人的交付物，跑通 = 端到端没坏。
       # 单测全绿但 demo 跑不起来，是很容易漏掉的一种失败。
-      - name: 端到端冒烟（三个 demo）
+      - name: 端到端冒烟（四个 demo）
         run: |
           python run_demo.py
           python run_dirty_demo.py
           python run_llm_demo.py
+          python run_wire_demo.py
 
   zero-dep:
     name: 零依赖可用性
     runs-on: ubuntu-latest
+    env:
+      PEER_AGENTS_REQUIRE_NODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,11 +62,40 @@ jobs:
 
       # README 承诺「零运行时依赖，只装标准库就能跑」——
       # 这一条必须被 CI 真的验证，而不是写在文档里当口号。
+      #
+      # 线协议层也必须守住这一条：它只用 json + socket，没有 aiohttp，
+      # 没有 pydantic，更没有 websockets。下面这个 job 就是这道闸门。
       - name: 不装任何东西，直接用标准库跑测试
         run: python -m unittest discover -s tests -v
 
       - name: 不装任何东西，跑核心 demo
         run: python run_demo.py
+
+      - name: 不装任何东西，跑跨语言 demo
+        run: python run_wire_demo.py
+
+  interop:
+    name: 跨语言互操作（Python ↔ Node）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # 单独拎出来一个 job，是因为「跨语言」这四个字很容易变成一句
+      # 没人验证的营销话术。这里把它钉死：真起一个 node 进程，
+      # 真握手，真换信，真的把一次协作跑完。
+      - name: 互操作测试
+        env:
+          PEER_AGENTS_REQUIRE_NODE: "1"
+        run: python -m unittest tests.test_interop -v
+
+      - name: 跨语言演示（结论/轮次/消息量/拓扑演化必须逐项一致）
+        run: python run_wire_demo.py
 
   lint:
     name: 静态检查
