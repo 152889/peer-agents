@@ -7,8 +7,9 @@
 结论是可以量化的,而且有点反直觉。整个项目**零依赖**,只用 Python 标准库。
 
 ```bash
-python run_demo.py          # 五组拓扑对比实验,约 0.1 秒跑完
-python -m unittest discover -s tests    # 19 项回归测试
+python run_demo.py            # 五组拓扑对比实验,约 0.1 秒跑完
+python run_llm_demo.py        # 用 LLM 协议端到端跑一遍(自带本地桩服务)
+python -m unittest discover -s tests    # 25 项回归测试
 ```
 
 ---
@@ -45,6 +46,9 @@ python -m unittest discover -s tests    # 19 项回归测试
 ```
 peer-agents/
 ├── run_demo.py                 五组配置的对比实验入口
+├── run_llm_demo.py             LLM 协议端到端演示(可切换真实模型)
+├── tools/
+│   └── mock_llm_server.py      本地 LLM 桩服务(用于验证协议层)
 ├── peer_agents/
 │   ├── message.py              不可变消息模型(可寻址/可转发/可多跳)
 │   ├── bus.py                  消息总线:投递 + 拓扑管控 + 路由 + 建链协商
@@ -55,7 +59,7 @@ peer-agents/
 │   ├── scenario_incident.py    演示场景:一次生产故障的分布式定位
 │   ├── llm.py                  可选:把规则大脑换成 LLM 大脑
 │   └── report.py               控制台 trace 与 HTML 报告
-└── tests/test_peer_agents.py   19 项回归测试(把上面每条结论钉死)
+└── tests/test_peer_agents.py   25 项回归测试(把上面每条结论钉死)
 ```
 
 ### 三个设计决定
@@ -107,10 +111,11 @@ Agent 只负责「身份 + 信箱」,决策逻辑放在可插拔的 `Brain` 里�
 - 三种拓扑都能得到相同根因,枢纽转述会丢失细节
 - 自适应拓扑能从稀疏起点自组织,且效率追平全连通
 - 挂起队列正确阻塞收敛判定
+- **`LLMBrain` 的协议层**:prompt 渲染完整、HTTP 请求成形、响应解析容错(围栏代码块 / 夹杂解释文字 / 缺字段),且走完整协议后得到的**终报文本与轮次和规则大脑完全一致** —— 说明传输层没有引入失真
 
 **未验证**(欢迎 PR):
 
-- ⚠️ **`LLMBrain` 从未真正跑过。** 代码路径完整,但没有 API key,没有端到端跑过真实模型。这是目前最大的软肋,也是我最想被别人先验证的部分——尤其是「模型在能看到拓扑状态的情况下,会不会主动去连正确的同事」。
+- ⚠️ **`LLMBrain` 从未接过真实模型。** 协议层已用本地桩服务验证通过(`python run_llm_demo.py`),但那证明的是「管线通」,不是「模型好」。真实模型会不会主动去问对的人、会不会把结论说清楚、会不会在拓扑里挑对邻居 —— 这些问题桩服务回答不了,也没有资格假装能回答。这是目前最想被别人先验证的部分。
 - 演示场景是**合成的、规则驱动的**。它证明的是通信机制,不是「真实 LLM 团队协作效果」。
 - 单线程轮转调度,为的是让 trace 完全可复现。**没有做并发**,并发下的竞态未测。
 - 节点规模只有 5 个,没有测过几十上百个 Agent 时的路由与收敛表现。
@@ -126,13 +131,22 @@ Agent 只负责「身份 + 信箱」,决策逻辑放在可插拔的 `Brain` 里�
 
 ## 五、如何接真实模型
 
+`run_llm_demo.py` 默认会自己起一个**符合 OpenAI 协议的本地桩服务**,所以不需要任何凭证就能验证协议层:
+
+```bash
+python run_llm_demo.py            # 用桩服务跑,不需要 key
+```
+
+想换成真实模型,不用改代码:
+
 ```bash
 export OPENAI_API_KEY=sk-xxx
 export OPENAI_BASE_URL=https://api.openai.com/v1   # 可选
 export OPENAI_MODEL=gpt-4o-mini                     # 可选
+python run_llm_demo.py --real
 ```
 
-把 `scenario_incident.py` 里 `_build_brains()` 返回的 `RuleBrain` 换成 `LLMBrain(persona=..., skills=...)` 即可,通信层完全不用改。
+或者把 `scenario_incident.py` 里 `build(brain_mode="llm")` 用在你自己的流程里 —— 通信层完全不用改。
 
 `LLMBrain` 约束模型必须返回严格的 JSON 数组,形如:
 
@@ -140,7 +154,7 @@ export OPENAI_MODEL=gpt-4o-mini                     # 可选
 [{"to": ["dba"], "kind": "QUERY", "topic": "slow_query", "content": "..."}]
 ```
 
-这样模型只是在「决定跟谁说什么」,而不能越权改动框架。
+这样模型只是在「决定跟谁说什么」,而不能越权改动框架。解析层对模型的常见「不听话」做了容错(围栏代码块、夹杂解释文字、缺字段),任何一种异常都退化为「本轮不发消息」——**在一个自主通信的群体里,一个成员失语,比它把错误指令广播出去要好。**
 
 ---
 
@@ -162,6 +176,7 @@ export OPENAI_MODEL=gpt-4o-mini                     # 可选
 1. **`relayed_by == hub` 在 `hub is None` 时退化成 `None == None` 恒真**,导致所有消息绕过拓扑直投,动态拓扑完全失效。必须写成 `self.hub is not None and msg.relayed_by == self.hub`。
 2. **收敛判定漏掉挂起队列**。原本 `active == 0` 就判定稳定态,结果是正在等建链的消息会在静默瞬间被悄悄遗弃,终报保真度直接掉到 0。
 3. **建链请求丢失原始语义**。LINK_REQUEST 需要携带 `origin_kind`,否则收方无法区分「这是业务提问」和「这是在上报结论」,会把该接受的连接拒掉。
+4. **把「沉淀交付物」写进了大脑,而不是框架**。规则大脑会顺手往黑板写结论,LLM 大脑只会「说话」。结果换成 LLM 后终报凭空消失(保真度 0%),而消息流看起来完全正常。教训:**大脑只该决定「说什么」,框架才该决定「留下什么」。**
 
 ---
 

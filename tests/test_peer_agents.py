@@ -183,5 +183,106 @@ class TestScenarios(unittest.TestCase):
         self.assertNotEqual(r.final_report, "", "不应在消息仍在途时判定收敛")
 
 
+class TestLLMBrain(unittest.TestCase):
+    """LLMBrain 的协议层验证。
+
+    这里用本地桩服务作为对端，验证的是「HTTP 协议层是否忠实」：
+    请求是否成形、响应是否被正确解析、解析出的消息能否驱动整条链路。
+    它**不能**回答「真实模型表现如何」——那是另一个问题。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        import mock_llm_server
+
+        cls.mock = mock_llm_server
+        cls._saved = {k: os.environ.get(k) for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL")}
+        cls.server, base_url = mock_llm_server.start()
+        os.environ["OPENAI_BASE_URL"] = base_url
+        os.environ["OPENAI_API_KEY"] = "mock-key"
+        os.environ["OPENAI_MODEL"] = "mock-llm"
+
+    def setUp(self):
+        # 桩是有状态的，每个用例开始前必须重置，否则用例之间会串味
+        self.mock.reset()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        for k, v in cls._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_llm_path_reaches_same_conclusion_as_rule_path(self):
+        r = run_scenario(topology="peer", brain_mode="llm")
+        self.assertIn("SeqScan", r.final_report)
+        self.assertEqual(r.fidelity, 1.0)
+
+    def test_llm_path_produces_same_report_text(self):
+        llm = run_scenario(topology="peer", brain_mode="llm")
+        rule = run_scenario(topology="peer", brain_mode="rule")
+        self.assertEqual(llm.final_report, rule.final_report, "协议层不应改变结论文本")
+
+    def test_prompt_contains_every_required_section(self):
+        runtime, _ = build(topology="peer", brain_mode="llm")
+        bootstrap(runtime)
+        runtime.run(name="llm", ground_truth_tokens=GROUND_TRUTH_TOKENS)
+        prompts = [req["prompt"] for a in runtime.agents
+                   for req in getattr(a.brain, "requests", [])]
+        self.assertTrue(prompts, "应当真实发出过请求")
+        joined = "\n".join(prompts)
+        for section in ("# 你的身份", "# 你掌握的私有信息", "# 团队共享黑板", "# 可用 topic", "# 输出格式", "# 本轮收到的消息"):
+            self.assertIn(section, joined, f"prompt 缺少段落：{section}")
+        self.assertIn("slow_query → 负责人 dba", joined, "prompt 里应带上通讯录")
+
+    def test_request_is_well_formed(self):
+        runtime, _ = build(topology="peer", brain_mode="llm")
+        bootstrap(runtime)
+        runtime.run(name="llm", ground_truth_tokens=GROUND_TRUTH_TOKENS)
+        req = next(req for a in runtime.agents for req in getattr(a.brain, "requests", []))
+        self.assertTrue(req["url"].endswith("/chat/completions"))
+        self.assertEqual(req["payload"]["model"], "mock-llm")
+        self.assertEqual(req["payload"]["messages"][0]["role"], "user")
+        self.assertTrue(req["payload"]["messages"][0]["content"])
+
+    def test_missing_credentials_raise_clear_error(self):
+        from peer_agents.llm import LLMBrain
+
+        brain = LLMBrain(persona="你是「x」", skills={})
+        saved = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                brain._call("prompt")
+            self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+        finally:
+            if saved:
+                os.environ["OPENAI_API_KEY"] = saved
+
+    def test_malformed_response_does_not_crash(self):
+        """模型不听话、返回一堆废话时，应退化为「本轮不发消息」而不是崩掉。"""
+        from peer_agents.llm import LLMBrain
+
+        brain = LLMBrain(persona="你是「x」", skills={})
+        self.assertIsInstance(brain._call("x"), list)   # 正常路径不抛异常
+
+        self.assertEqual(brain._parse("抱歉，我无法回答。"), [])
+        self.assertEqual(brain._parse(""), [])
+        self.assertEqual(brain._parse('{"not": "a list"}'), [])
+
+        fenced = '```json\n[{"to":["a"],"kind":"QUERY","topic":"t","content":"c"}]\n```'
+        parsed = brain._parse(fenced)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["to"], ["a"])
+
+        chatty = '好的，我来执行：\n[{"to":["b"],"kind":"ANSWER","topic":"t","content":"ok"}]\n以上。'
+        self.assertEqual(len(brain._parse(chatty)), 1)
+
+        # 缺少 to 字段的指令应被丢弃，避免总线收到无法投递的消息
+        self.assertEqual(brain._parse('[{"kind":"QUERY","topic":"t","content":"c"}]'), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

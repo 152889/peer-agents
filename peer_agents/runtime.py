@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from .agent import Agent
 from .blackboard import Blackboard
 from .bus import MessageBus
-from .message import CONTROL_KINDS, Message
+from .message import CONTROL_KINDS, FINAL, Message
 
 
 @dataclass
@@ -130,6 +130,11 @@ class Runtime:
                     continue
                 active += 1
                 for msg in agent.step(self.board):
+                    # 交付物沉淀是**框架**的职责，不是大脑的职责。
+                    # 大脑只决定「说什么」，框架决定「留下什么」。
+                    # 否则 LLM 大脑（只发消息、不写黑板）的结论就会凭空消失。
+                    if msg.kind == FINAL:
+                        self.board.publish(msg.topic, msg.content, agent.id)
                     self.bus.send(msg)
             # 收敛判定必须同时看「没人有信」和「没有消息还卡在路上」——
             # 后者若被忽略，正在等建链的消息会在静默瞬间被悄悄遗弃。

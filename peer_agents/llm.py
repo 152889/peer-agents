@@ -23,7 +23,7 @@ import urllib.request
 
 from .agent import Agent
 from .blackboard import Blackboard
-from .message import Message
+from .message import ANSWER, FINAL, Message
 
 SYSTEM_TEMPLATE = """你是多 Agent 协作团队中的一名成员。
 
@@ -69,6 +69,14 @@ class LLMBrain:
         self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self.temperature = temperature
         self.base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        self.requests: list[dict] = []   # 观测：记录每一次真实发出的请求，便于调试与测试
+
+    # ------------------------------------------------------------------
+    def accepts_link(self, requester: str, msg: Message) -> bool:
+        """与 RuleBrain 同构的建链策略，保证 LLM 大脑也能参与动态拓扑协商。"""
+        if msg.topic in self.skills:
+            return True
+        return msg.kind in (ANSWER, FINAL) or msg.origin_kind in (ANSWER, FINAL)
 
     # ------------------------------------------------------------------
     def think(self, agent: Agent, batch: list[Message], board: Blackboard) -> list[Message]:
@@ -119,6 +127,7 @@ class LLMBrain:
             "temperature": self.temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
+        self.requests.append({"url": f"{self.base_url}/chat/completions", "prompt": prompt, "payload": payload})
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -126,12 +135,33 @@ class LLMBrain:
         )
         with urllib.request.urlopen(req, timeout=90) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-        text = body["choices"][0]["message"]["content"].strip()
+        return self._parse(body["choices"][0]["message"]["content"])
+
+    @staticmethod
+    def _parse(text: str) -> list[dict]:
+        """把模型输出解析成指令列表。
+
+        容错是刻意设计的：模型经常会用 ```json 围栏包裹、或者附上解释文字。
+        任何一种异常都退化为「本轮不发消息」，而不是让整个协作崩掉 ——
+        在一个自主通信的群体里，一个成员失语，比它把错误指令广播出去要好。
+        """
+        text = (text or "").strip()
         if text.startswith("```"):
-            text = text.split("```")[1]
-            text = text[4:] if text.lower().startswith("json") else text
+            parts = text.split("```")
+            if len(parts) > 1:
+                text = parts[1]
+                text = text[4:] if text.lower().startswith("json") else text
         try:
-            data = json.loads(text)
-            return data if isinstance(data, list) else []
+            data = json.loads(text.strip())
         except json.JSONDecodeError:
+            # 再试一次：截取第一个 [ 到最后一个 ] 之间的内容
+            start, end = text.find("["), text.rfind("]")
+            if start == -1 or end <= start:
+                return []
+            try:
+                data = json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                return []
+        if not isinstance(data, list):
             return []
+        return [item for item in data if isinstance(item, dict) and item.get("to")]

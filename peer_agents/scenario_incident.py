@@ -24,6 +24,7 @@ from __future__ import annotations
 from .agent import Agent, RuleBrain
 from .blackboard import Blackboard
 from .bus import MessageBus, full_mesh_policy, star_policy
+from .llm import LLMBrain
 from .runtime import Runtime
 from .topology import Topology
 
@@ -68,6 +69,7 @@ def build(
     hub_summarize_chars: int | None = None,
     publish_all_findings: bool = False,
     link_budget: int = LINK_BUDGET,
+    brain_mode: str = "rule",
 ) -> tuple[Runtime, Blackboard]:
     """组装一个可运行的故障定位系统。
 
@@ -78,11 +80,14 @@ def build(
     hub_summarize_chars: 枢纽代投时的截断长度，用来模拟「主 Agent 转述丢细节」
     publish_all_findings: 是否把中间结论也贴上共享黑板
     link_budget: 每个 Agent 最多持有的直连数（仅 adaptive 模式生效）
+    brain_mode:
+        "rule" 确定性 RuleBrain，用于可复现实验
+        "llm"  LLMBrain，真实走 HTTP 大模型协议（需要 OPENAI_API_KEY / BASE_URL）
     """
     active_hub = hub if topology == "star" else None
     board = Blackboard()
     board.publish_directory(DIRECTORY)
-    brain_map = _build_brains(active_hub, hub_summarize_chars)
+    brain_map = _build_brains(active_hub, hub_summarize_chars, brain_mode)
 
     if topology == "peer":
         bus = MessageBus(policy=full_mesh_policy)
@@ -116,7 +121,13 @@ def build(
     return Runtime(agents, bus, board, hub=active_hub), board
 
 
-def _build_brains(active_hub: str | None, hub_summarize_chars: int | None) -> dict[str, RuleBrain]:
+def _build_brains(
+    active_hub: str | None,
+    hub_summarize_chars: int | None,
+    brain_mode: str = "rule",
+) -> dict[str, object]:
+    if brain_mode == "llm":
+        return _build_llm_brains()
     return {
         "sre": RuleBrain(
             owns=(T_REPORT,),
@@ -162,6 +173,42 @@ def _build_brains(active_hub: str | None, hub_summarize_chars: int | None) -> di
                 "原 idx_order_items_status 单列索引不再匹配新谓词。"
             },
         ),
+    }
+
+
+_LLM_ROLES = {
+    "sre": "值班 SRE，负责汇总各方信息并出具最终事故报告。你手上没有一手数据。",
+    "gateway": "API 网关负责人，负责判断故障是否出在网关侧，还是在下游依赖。",
+    "dba": "数据库团队负责人，负责慢查询、执行计划与索引。",
+    "deploy": "发布平台负责人，负责发布记录与每次发布包含的变更。",
+    "ordersvc": "订单服务负责人，负责订单服务的代码与查询变更。",
+}
+
+# LLM 大脑的「私有信息」＝ 各 Agent 手上的一手数据，其余推理全部交给模型
+_LLM_SKILLS: dict[str, dict[str, str]] = {
+    "sre": {},
+    "gateway": {
+        T_SCOPE: "网关自身 P99 仅 8ms，外部 QPS 稳定在 1200/s；瓶颈在下游数据库连接等待（320ms）。"
+    },
+    "dba": {T_SLOWQ: "order_items 出现全表扫描，单次耗时 780ms（基线为索引扫描 12ms）。"},
+    "deploy": {T_RELEASE: "v2.31 于昨日 14:00 由订单服务发布，本次发布不含任何 DDL 或索引变更。"},
+    "ordersvc": {
+        T_QUERYCHG: "v2.31 将下单查询的 WHERE 谓词由 status='NEW' 重写为 status IN (6 个值)，"
+        "原 idx_order_items_status 单列索引不再匹配新谓词。"
+    },
+}
+
+
+def _build_llm_brains() -> dict[str, object]:
+    """用真实大模型替换规则大脑。
+
+    注意：``persona`` 里保留了「你是「<agent_id>」」这个可解析的标记，
+    是为了让本地桩服务能够识别身份（见 tools/mock_llm_server.py）。
+    真实模型并不依赖这个格式。
+    """
+    return {
+        aid: LLMBrain(persona=f"你是「{aid}」，{_LLM_ROLES[aid]}", skills=_LLM_SKILLS.get(aid, {}))
+        for aid in _ROSTER
     }
 
 
