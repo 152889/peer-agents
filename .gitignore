@@ -9,6 +9,12 @@ env/
 # 实验产物（由 run_demo.py 生成，不入库）
 out/
 
+# 工具缓存：这三者会各自写一个只含 "*" 的 .gitignore 自我屏蔽，
+# 但那是各工具的私有行为、换个版本就可能失效 —— 这里显式写一遍才可靠
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # 环境变量：LLMBrain 从环境读取凭证，切勿提交
 .env
 .env.*
