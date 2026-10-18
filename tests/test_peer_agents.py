@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import unittest
 
@@ -20,7 +22,7 @@ from peer_agents.scenario_incident import (
     T_SCOPE,
     build,
 )
-from peer_agents.topology import Topology
+from peer_agents.topology import Topology, edge_key
 
 HUB = "sre"
 
@@ -77,6 +79,95 @@ class TestTopology(unittest.TestCase):
         for peer in ("b", "c", "d", "e"):
             t.try_link("a", peer)
         self.assertLessEqual(t.degree()["a"], 2)
+
+
+class TestDeterminism(unittest.TestCase):
+    """确定性回归：同一配置下，输出不该随进程变。
+
+    ``Topology.links`` 是 ``dict[str, set[str]]`` —— set 的迭代顺序取决于字符串
+    哈希，而 ``PYTHONHASHSEED`` 默认**每个进程随机**。凡是「迭代 set 再输出」
+    的地方都会变成不确定的，其中 ``edges()`` 就漏了（``route()`` 一直是对的）。
+
+    这类缺陷在同一个进程里几乎观测不到（进程内哈希稳定），必须**换进程、换种子**
+    才暴露得出来 —— 所以下面用子进程而不是循环调用。
+    """
+
+    _PROBE = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from peer_agents.topology import Topology, edge_key
+
+# 1) 链路枚举：给 a 挂 4 条直连，顺序差异才有机会显形
+t = Topology(["a", "b", "c", "d", "e"], budget=5,
+             initial_links=[("a", "b"), ("a", "c"), ("a", "d"), ("a", "e")])
+edges = t.edges()
+
+# 2) LRU 并列：人为把 a-b / a-c 的 last_used 写成同一个值
+u = Topology(["a", "b", "c", "d"], budget=2, initial_links=[("a", "b")])
+u.try_link("a", "c")
+for peer in ("b", "c"):
+    u.last_used[edge_key("a", peer)] = 7
+u.try_link("a", "d")
+
+print(json.dumps({
+    "edges": edges,
+    "kept": [p for p in ("b", "c") if u.has_link("a", p)],
+    "evictions": u.evictions,
+}))
+"""
+
+    def test_output_is_independent_of_hash_seed(self):
+        """``edges()`` 的顺序、以及 LRU 并列时的淘汰结果，都不得随种子变。
+
+        修复前：``edges()`` 直接迭代 ``self.links[a]``，6 个种子会打印出多种
+        链路顺序，``run_demo.py`` 的「最终：」那一行每次不一样 —— 与 README
+        宣称的「两次同配置运行可逐字节 diff」直接矛盾。
+        """
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        runs: list[tuple[str, str]] = []
+        for seed in ("0", "1", "2", "3", "4", "5"):
+            proc = subprocess.run(
+                [sys.executable, "-c", self._PROBE, root],
+                capture_output=True,
+                text=True,
+                check=True,
+                env={**os.environ, "PYTHONHASHSEED": seed},
+            )
+            runs.append((seed, proc.stdout.strip()))
+
+        base_seed, base = runs[0]
+        for seed, out in runs[1:]:
+            with self.subTest(seed=seed):
+                self.assertEqual(out, base, f"PYTHONHASHSEED={seed} 与 {base_seed} 的输出不同")
+
+        payload = json.loads(base)
+        self.assertEqual(
+            [tuple(e) for e in payload["edges"]],
+            [("a", "b"), ("a", "c"), ("a", "d"), ("a", "e")],
+            "每条链路应只出现一次，且顺序确定",
+        )
+        self.assertEqual(payload["kept"], ["c"], "并列时应淘汰字典序更小的 a-b")
+        self.assertEqual(payload["evictions"], 1)
+
+    def test_eviction_tie_is_broken_by_peer_name(self):
+        """``last_used`` 并列时按 peer 名字兜底，而不是按 set 迭代序。
+
+        这条分支**目前走不到**：唯一的建链入口 ``force_link`` 建链后必定
+        ``touch``，而 ``clock`` 严格递增，因此同一节点的邻居 ``last_used``
+        必然互不相同（实测 budget=1/2/3 三档、共 10 次淘汰也没有出现并列）。
+
+        所以这个测试是在**防未来**：一旦有人加了「不 touch 就建链」的路径，
+        并列就会出现；届时淘汰结果必须仍然确定，否则拓扑演化与实验结论都
+        不可复现 —— 那是比显示顺序严重得多的问题。
+        """
+        t = Topology(["a", "b", "c", "d"], budget=2, initial_links=[("a", "b")])
+        t.try_link("a", "c")  # a: {b, c}，预算已满
+        for peer in ("b", "c"):
+            t.last_used[edge_key("a", peer)] = 7  # 人为制造并列
+        t.try_link("a", "d")
+        self.assertTrue(t.has_link("a", "c"), "并列时保留名字较大的 a-c")
+        self.assertFalse(t.has_link("a", "b"), "并列时淘汰名字较小的 a-b")
+        self.assertEqual(t.evictions, 1)
 
 
 class TestBus(unittest.TestCase):

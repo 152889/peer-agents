@@ -61,10 +61,18 @@ class Topology:
         return {n: len(self.links[n]) for n in self.nodes}
 
     def edges(self) -> list[tuple[str, str]]:
+        """返回当前所有链路，**顺序是确定的**。
+
+        ``self.links[a]`` 是 ``set``，直接迭代的顺序取决于字符串哈希，而
+        ``PYTHONHASHSEED`` 默认每个进程随机 —— 于是同一条链路在两次运行里
+        可能以不同顺序打印出来。``route()`` 早就用 ``sorted()`` 处理了这件事，
+        这里当初漏掉了：表现为 ``run_demo.py`` 的「最终：」那一行每次不一样，
+        与 README 宣称的「两次同配置运行可逐字节 diff」相矛盾。
+        """
         seen: set[Key] = set()
         out: list[tuple[str, str]] = []
         for a in self.nodes:
-            for b in self.links[a]:
+            for b in sorted(self.links[a]):
                 k = edge_key(a, b)
                 if k in seen:
                     continue
@@ -106,9 +114,13 @@ class Topology:
             return True
         for n in (a, b):
             while len(self.links[n]) >= self.budget and self.links[n]:
+                # 末位的 peer 是**并列时的确定性兜底**。``self.links[n]`` 是
+                # set，若两条链路 ``last_used`` 相同，``min`` 会返回迭代序里
+                # 先遇到的那个 —— 而 set 的顺序随 PYTHONHASHSEED 变。那意味着
+                # 「淘汰谁」在不同进程里可能不同，进而改变拓扑演化与实验结论。
                 victim = min(
                     self.links[n],
-                    key=lambda peer: self.last_used.get(edge_key(n, peer), 0),
+                    key=lambda peer: (self.last_used.get(edge_key(n, peer), 0), peer),
                 )
                 self.unlink(n, victim)
                 self.evictions += 1
