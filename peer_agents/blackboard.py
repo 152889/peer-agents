@@ -15,7 +15,7 @@ from __future__ import annotations
 class Blackboard:
     def __init__(self) -> None:
         self.registry: dict[str, list[str]] = {}     # topic -> 知情者列表（可能有多个）
-        self.facts: dict[str, tuple[str, str]] = {}  # topic -> (内容, 作者)
+        self.facts: dict[str, tuple[str, str]] = {}  # topic -> （内容，作者）
         self.artifacts: dict[str, str] = {}          # 命名产物（最终交付物等）
         self.round: int = 0                          # 由 Runtime 每轮推进，供大脑判断「新鲜度」
 

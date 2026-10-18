@@ -102,8 +102,8 @@ class RuleBrain:
     ) -> None:
         self.owns = set(owns)
         self.facts = dict(facts or {})
-        self.triggers = list(triggers)      # [(已知 topic, 需要的 topic), ...]
-        self.hypothesis = hypothesis        # (前提 topic 集合, 结论 topic, 结论模板)
+        self.triggers = list(triggers)      # [(已知 topic，需要的 topic), ...]
+        self.hypothesis = hypothesis        # （前提 topic 集合，结论 topic，结论模板）
         self.report_to = report_to
         # 仅枢纽会用到：代投时把长消息截断，模拟「主 Agent 转述时丢细节」
         self.summarize_chars = summarize_chars

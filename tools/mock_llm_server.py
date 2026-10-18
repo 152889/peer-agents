@@ -140,7 +140,7 @@ class _Handler(BaseHTTPRequestHandler):
 def start(port: int = 0) -> tuple[ThreadingHTTPServer, str]:
     """在后台线程启动桩服务。port=0 表示自动选一个空闲端口。
 
-    返回 (server, base_url)。
+    返回（server, base_url）。
     """
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

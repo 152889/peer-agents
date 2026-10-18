@@ -143,7 +143,7 @@ class MessageBus:
         return list(dict.fromkeys(out))
 
     def _transmit(self, msg: Message, dst: str, attempts: int) -> tuple[int, bool]:
-        """返回 (投递条数, 是否被挂起等待建链)。"""
+        """返回（投递条数，是否被挂起等待建链）。"""
         # 注意 hub 可能为 None，必须先判空：否则 `None == None` 恒真，
         # 会让所有消息绕过拓扑直投。
         if self.hub is not None and msg.relayed_by == self.hub:

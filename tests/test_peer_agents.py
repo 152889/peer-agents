@@ -262,8 +262,8 @@ class TestLLMBrain(unittest.TestCase):
                 os.environ["OPENAI_API_KEY"] = saved
 
     def test_string_recipient_is_not_exploded_into_characters(self):
-        """`"to": "audit"` 若被 tuple() 直接吃掉，会拆成 a/u/d/i/t 五个幽灵收件人,
-        真正的 audit 一条都收不到 —— 没有异常、没有日志,只表现为「对方没回我」。"""
+        """`"to": "audit"` 若被 tuple() 直接吃掉，会拆成 a/u/d/i/t 五个幽灵收件人，
+        真正的 audit 一条都收不到 —— 没有异常、没有日志，只表现为「对方没回我」。"""
         from peer_agents.llm import LLMBrain
 
         parsed = LLMBrain._parse('[{"to":"audit","kind":"QUERY","topic":"t","content":"c"}]')
